@@ -39,6 +39,7 @@ def camera() -> ComelitIntercomCamera:
     coordinator.video_session = None
     coordinator.device_config = MagicMock()
     coordinator._video_ready_event = asyncio.Event()
+    coordinator.async_ensure_video = AsyncMock()
     cam = ComelitIntercomCamera(coordinator, "test_entry")
     return cam
 
@@ -513,6 +514,41 @@ class TestWebRtcSignaling:
         assert any(type(m).__name__ == "WebRTCError" for m in sent)
         camera.close_webrtc_session("sess2")
         await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_offer_starts_intercom_video_before_go2rtc(self, camera):
+        """Opening the camera starts the call; go2rtc is only contacted after."""
+        _wire_hass(camera)
+        order = []
+        camera.coordinator.async_ensure_video = AsyncMock(side_effect=lambda: order.append("video"))
+        ws = _FakeWs([])
+        session = _session_with_ws(ws)
+        session.ws_connect = AsyncMock(side_effect=lambda *a, **k: order.append("go2rtc") or ws)
+        with patch(
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
+        ):
+            await camera.async_handle_async_webrtc_offer("sdp", "sess_v", lambda m: None)
+        assert order == ["video", "go2rtc"]
+        camera.close_webrtc_session("sess_v")
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_video_start_failure_sends_error_without_go2rtc(self, camera):
+        _wire_hass(camera)
+        camera.coordinator.async_ensure_video = AsyncMock(side_effect=RuntimeError("UDPM timeout"))
+        session = MagicMock()
+        session.ws_connect = AsyncMock()
+        sent = []
+        with patch(
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
+        ):
+            await camera.async_handle_async_webrtc_offer("sdp", "sess_f", sent.append)
+        assert [type(m).__name__ for m in sent] == ["WebRTCError"]
+        assert sent[0].code == "video_start_failed"
+        session.ws_connect.assert_not_awaited()
+        assert "sess_f" not in camera._webrtc_sessions
 
     @pytest.mark.asyncio
     async def test_ws_connect_failure_sends_error(self, camera):

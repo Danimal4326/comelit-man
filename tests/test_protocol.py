@@ -123,21 +123,21 @@ class TestDoorPayloads:
         assert payload[:4] == bytes([0xC0, 0x18, 0x5C, 0x8B])
 
     def test_open_door_message(self):
-        payload = encode_open_door(MessageType.OPEN_DOOR, "00000001", 1, "00000000")
+        payload = encode_open_door(MessageType.OPEN_DOOR, "000000013", "00000100")
         # starts with OPEN_DOOR type LE
         assert payload[:2] == struct.pack("<H", MessageType.OPEN_DOOR)
-        assert b"000000011\x00" in payload  # apt_address + output_index
-        assert b"00000000\x00" in payload  # door_apt_address
+        # sender (apt-address + apt-subaddress) then door address
+        assert payload.endswith(b"\xff\xff\xff\xff000000013\x0000000100\x00\x00")
 
     def test_open_door_confirm_message(self):
-        payload = encode_open_door(MessageType.OPEN_DOOR_CONFIRM, "00000001", 1, "00000000")
+        payload = encode_open_door(MessageType.OPEN_DOOR_CONFIRM, "000000013", "00000100")
         assert payload[:2] == struct.pack("<H", MessageType.OPEN_DOOR_CONFIRM)
 
     def test_door_init_contains_output_index(self):
-        payload = encode_door_init("00000001", 1, "00000000")
+        payload = encode_door_init("000000013", 1, "00000100")
         assert payload[:4] == bytes([0xC0, 0x18, 0x70, 0xAB])
-        # output_index as LE uint32
-        assert struct.pack("<I", 1) in payload
+        # output_index as LE uint32, then sender and door addresses
+        assert struct.pack("<I", 1) + b"\xff\xff\xff\xff000000013\x0000000100\x00" in payload
 
     def test_ctpp_init_with_timestamp_differs_from_legacy(self):
         """encode_ctpp_init with a timestamp must differ from the legacy hardcoded one."""

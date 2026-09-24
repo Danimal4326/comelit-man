@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.3
+
+### Bug fixes
+
+- **Door open works when the app sub-address differs from the relay output index** — regular-door frames (OPEN/CONFIRM and door_init) now name the sender as apt-address + apt-subaddress, the address our CTPP channel is registered under and the one the Android app uses in its PCAP-verified in-call door open. They previously used apt-address + output-index, which only coincides when both are the same number; on an intercom where Home Assistant sits at sub-address 3 and the gate is output 1, the device silently ignored every open. The relay is still selected by door_init's explicit output-index field. Actuator frames are unchanged (they have no separate relay field)
+
+### New features
+
+- **Opening the camera starts the intercom call** — the intercom only streams during a call, so the camera view (WebRTC) used to connect to an empty stream. A WebRTC offer now starts a video session when none is running, or waits for one already starting; the session then follows its usual 120 s timeout / restart-while-watched lifecycle
+
 ## 1.5.2
 
 ### Bug fixes

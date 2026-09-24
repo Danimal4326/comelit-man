@@ -1332,6 +1332,55 @@ class TestGo2RtcRegistration:
         get_session.assert_not_called()
 
 
+class TestEnsureVideo:
+    """Viewing the camera starts the intercom call when none is running."""
+
+    @staticmethod
+    def _coord():
+        coord = _make_coordinator()
+        coord._video_session = None
+        coord._video_start_lock = asyncio.Lock()
+        coord._video_ready_event = asyncio.Event()
+        coord.async_start_video = AsyncMock()
+        return coord
+
+    @pytest.mark.asyncio
+    async def test_starts_video_when_idle(self):
+        coord = self._coord()
+        await coord.async_ensure_video()
+        coord.async_start_video.assert_awaited_once_with(by_user=True)
+
+    @pytest.mark.asyncio
+    async def test_noop_when_session_active(self):
+        coord = self._coord()
+        coord._video_session = MagicMock()
+        await coord.async_ensure_video()
+        coord.async_start_video.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_waits_for_start_in_flight(self):
+        coord = self._coord()
+        await coord._video_start_lock.acquire()
+        waiter = asyncio.ensure_future(coord.async_ensure_video())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        coord._video_ready_event.set()
+        await waiter
+        coord.async_start_video.assert_not_awaited()
+        coord._video_start_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_start_in_flight_times_out(self):
+        coord = self._coord()
+        await coord._video_start_lock.acquire()
+        with (
+            patch("custom_components.comelit_man.coordinator.VIDEO_START_WAIT", 0.01),
+            pytest.raises(TimeoutError),
+        ):
+            await coord.async_ensure_video()
+        coord._video_start_lock.release()
+
+
 class TestGo2RtcEndpoint:
     """Resolve HA's go2rtc connection instead of assuming a TCP port."""
 

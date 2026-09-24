@@ -237,6 +237,15 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         candidate path — every trickled candidate raised "Cannot handle
         WebRTC candidate" and killed the session (observed live 2026-08-27).
         """
+        # Viewing the camera starts the intercom call — there is no video
+        # to relay otherwise.  Done before go2rtc connects so its RTSP pull
+        # finds a stream that already carries video.
+        try:
+            await self.coordinator.async_ensure_video()
+        except Exception as err:
+            _LOGGER.warning("Could not start intercom video for WebRTC viewer: %s", err)
+            send_message(WebRTCError(code="video_start_failed", message=str(err)))
+            return
         name = f"comelit_man_{self._entry_id}"
         session, base_url = go2rtc_endpoint(self.hass)
         try:
