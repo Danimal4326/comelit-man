@@ -12,6 +12,13 @@ CONF_CREATE_USER = "create_dedicated_user"
 DEFAULT_PORT = 64100
 DEFAULT_HTTP_PORT = 8080
 
+# Home Assistant's go2rtc integration publishes its connection in
+# hass.data[GO2RTC_DOMAIN]; the fallback URL is only used when that
+# integration is not set up (e.g. a Core install talking to a standalone
+# go2rtc on its default port).
+GO2RTC_DOMAIN = "go2rtc"
+GO2RTC_FALLBACK_URL = "http://127.0.0.1:1984"
+
 # Increment applied to our CTPP init timestamp to derive registration-renewal
 # ACK timestamps.  PCAP-verified on the 6701W (firmware 2.x).  Community notes
 # for other Comelit models report the same value for the 6742W, and one source

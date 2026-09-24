@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.comelit_man.coordinator import ComelitLocalCoordinator
+from custom_components.comelit_man.coordinator import ComelitLocalCoordinator, go2rtc_endpoint
 from custom_components.comelit_man.models import Camera, DeviceConfig, Door
 
 # ---------------------------------------------------------------------------
@@ -1267,12 +1267,13 @@ class TestGo2RtcRegistration:
         session = self._session()
 
         with patch(
-            "custom_components.comelit_man.coordinator.async_get_clientsession",
-            return_value=session,
+            "custom_components.comelit_man.coordinator.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
         ):
             await coord._register_go2rtc_stream()
 
         session.put.assert_called_once()
+        assert session.put.call_args.args[0] == "http://localhost:11984/api/streams"
         params = session.put.call_args.kwargs["params"]
         assert params["src"] == "rtsp://127.0.0.1:8557/intercom"
         assert "comelit_man_" in params["name"]
@@ -1286,8 +1287,8 @@ class TestGo2RtcRegistration:
 
         with (
             patch(
-                "custom_components.comelit_man.coordinator.async_get_clientsession",
-                return_value=session,
+                "custom_components.comelit_man.coordinator.go2rtc_endpoint",
+                return_value=(session, "http://localhost:11984"),
             ),
             patch("custom_components.comelit_man.coordinator._LOGGER") as mock_logger,
         ):
@@ -1303,8 +1304,8 @@ class TestGo2RtcRegistration:
         session.put = MagicMock(side_effect=OSError("connection refused"))
 
         with patch(
-            "custom_components.comelit_man.coordinator.async_get_clientsession",
-            return_value=session,
+            "custom_components.comelit_man.coordinator.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
         ):
             await coord._register_go2rtc_stream()  # must not raise
 
@@ -1314,20 +1315,50 @@ class TestGo2RtcRegistration:
         session = self._session()
 
         with patch(
-            "custom_components.comelit_man.coordinator.async_get_clientsession",
-            return_value=session,
+            "custom_components.comelit_man.coordinator.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
         ):
             await coord._deregister_go2rtc_stream()
 
         session.delete.assert_called_once()
+        assert session.delete.call_args.args[0] == "http://localhost:11984/api/streams"
 
     @pytest.mark.asyncio
     async def test_register_skips_when_no_rtsp_url(self):
         coord = _make_coordinator()
         coord._rtsp_url = None
-        with patch("custom_components.comelit_man.coordinator.async_get_clientsession") as get_session:
+        with patch("custom_components.comelit_man.coordinator.go2rtc_endpoint") as get_session:
             await coord._register_go2rtc_stream()
         get_session.assert_not_called()
+
+
+class TestGo2RtcEndpoint:
+    """Resolve HA's go2rtc connection instead of assuming a TCP port."""
+
+    def test_uses_ha_go2rtc_session_and_url(self):
+        """The HA-managed server is only reachable via the session HA publishes."""
+        ha_session = MagicMock()
+        hass = MagicMock()
+        hass.data = {"go2rtc": MagicMock(session=ha_session, url="http://localhost:11984/")}
+
+        session, base_url = go2rtc_endpoint(hass)
+
+        assert session is ha_session
+        assert base_url == "http://localhost:11984"
+
+    def test_falls_back_to_default_port_without_go2rtc_integration(self):
+        hass = MagicMock()
+        hass.data = {}
+        shared = MagicMock()
+
+        with patch(
+            "custom_components.comelit_man.coordinator.async_get_clientsession",
+            return_value=shared,
+        ):
+            session, base_url = go2rtc_endpoint(hass)
+
+        assert session is shared
+        assert base_url == "http://127.0.0.1:1984"
 
 
 class TestInboundRingDedup:
