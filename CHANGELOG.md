@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.2
+
+### Bug fixes
+
+- **WebRTC works with Home Assistant's built-in go2rtc** — stream registration and WebRTC signaling no longer assume go2rtc's API on `127.0.0.1:1984`. The HA-managed go2rtc server (OS/Container) listens only on a Unix socket with generated credentials, so live view failed with `Cannot connect to host 127.0.0.1:1984`. The integration now uses the session and URL HA's `go2rtc` integration publishes (including a user-configured `go2rtc: url:`), falling back to port 1984 only when that integration isn't set up; `go2rtc` is declared as an `after_dependency` so it is ready before stream registration
+
 ## 1.5.1
 
 ### Bug fixes

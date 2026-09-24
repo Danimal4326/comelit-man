@@ -440,13 +440,16 @@ class TestWebRtcSignaling:
             ]
         )
         sent = []
+        session = _session_with_ws(ws)
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("v=0\r\noffer", "sess1", sent.append)
             await asyncio.sleep(0.05)
 
+        session.ws_connect.assert_awaited_once()
+        assert session.ws_connect.call_args.args[0].startswith("http://localhost:11984/api/ws?src=comelit_man_")
         assert ws.sent[0] == {"type": "webrtc/offer", "value": "v=0\r\noffer"}
         kinds = [type(m).__name__ for m in sent]
         assert "WebRTCAnswer" in kinds
@@ -469,8 +472,8 @@ class TestWebRtcSignaling:
         )
         sent = []
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess_bin", sent.append)
             await asyncio.sleep(0.05)
@@ -487,8 +490,8 @@ class TestWebRtcSignaling:
         ws = _FakeWs([bad])
         sent = []
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess_bad", sent.append)
             await asyncio.sleep(0.05)
@@ -502,8 +505,8 @@ class TestWebRtcSignaling:
         ws = _FakeWs([_FakeWsMsg({"type": "error", "value": "stream not found"})])
         sent = []
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess2", sent.append)
             await asyncio.sleep(0.05)
@@ -517,7 +520,9 @@ class TestWebRtcSignaling:
         session = MagicMock()
         session.ws_connect = AsyncMock(side_effect=OSError("refused"))
         sent = []
-        with patch("custom_components.comelit_man.camera.async_get_clientsession", return_value=session):
+        with patch(
+            "custom_components.comelit_man.camera.go2rtc_endpoint", return_value=(session, "http://localhost:11984")
+        ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess3", sent.append)
         assert len(sent) == 1
         assert type(sent[0]).__name__ == "WebRTCError"
@@ -530,8 +535,8 @@ class TestWebRtcSignaling:
         ws.send_json = AsyncMock(side_effect=ConnectionError("gone"))
         sent = []
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess4", sent.append)
             await asyncio.sleep(0)
@@ -545,8 +550,8 @@ class TestWebRtcSignaling:
         _wire_hass(camera)
         ws = _FakeWs([])
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess5", lambda m: None)
         await camera.async_on_webrtc_candidate("sess5", RTCIceCandidateInit("candidate:9 1 udp 1 5.6.7.8 1 typ host"))
@@ -567,8 +572,8 @@ class TestWebRtcSignaling:
         _wire_hass(camera)
         ws = _FakeWs([])
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess6", lambda m: None)
         ws.send_json = AsyncMock(side_effect=ConnectionError("gone"))
@@ -584,8 +589,8 @@ class TestWebRtcSignaling:
         _wire_hass(camera)
         ws = _FakeWs([_FakeWsMsg(None, msg_type=__import__("aiohttp").WSMsgType.BINARY)])
         with patch(
-            "custom_components.comelit_man.camera.async_get_clientsession",
-            return_value=_session_with_ws(ws),
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
         ):
             await camera.async_handle_async_webrtc_offer("sdp", "sess7", lambda m: None)
         camera.close_webrtc_session("sess7")

@@ -25,7 +25,7 @@ from .auth import authenticate
 from .channels import ChannelType
 from .client import IconaBridgeClient
 from .config_reader import get_device_config
-from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN
+from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN, GO2RTC_DOMAIN, GO2RTC_FALLBACK_URL
 from .ctpp import _CTR_INCR_BOTH, ctpp_init_sequence
 from .door import open_door
 from .exceptions import AuthenticationError, DoorOpenError
@@ -45,6 +45,21 @@ RING_DEDUP_WINDOW = 120.0
 # A device 0x1840/0x0000 (idle) counts as a missed call only when it follows
 # a ring this recently; otherwise it is video-teardown / CTPP-init tail.
 MISSED_CALL_WINDOW = 45.0
+
+
+def go2rtc_endpoint(hass: HomeAssistant) -> tuple[aiohttp.ClientSession, str]:
+    """Return the aiohttp session and base URL for Home Assistant's go2rtc.
+
+    HA's go2rtc integration stores its connection in ``hass.data["go2rtc"]``.
+    On OS/Container installs that is the HA-managed server, which has no TCP
+    API listener — only a Unix socket with generated credentials — so the
+    session it publishes (socket connector + auth header) is the only way in.
+    A user-configured ``go2rtc: url:`` is honoured the same way.
+    """
+    config = hass.data.get(GO2RTC_DOMAIN)
+    if config is None:
+        return async_get_clientsession(hass), GO2RTC_FALLBACK_URL
+    return config.session, str(config.url).rstrip("/")
 
 
 class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
@@ -690,9 +705,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     async def _register_go2rtc_stream(self) -> None:
         """Register our RTSP stream with go2rtc, enabling backchannel support.
 
-        go2rtc must be running (bundled in HA OS/Container/Supervised).
-        Failures are logged at debug level and do not block setup — the
-        integration still works without go2rtc (RTSP/HLS only, no WebRTC).
+        Talks to HA's own go2rtc (see `go2rtc_endpoint`).  Failures are
+        logged at debug level and do not block setup — the integration still
+        works without go2rtc (RTSP/HLS only, no WebRTC).
         """
         if not self._rtsp_url:
             return
@@ -702,9 +717,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # source flag is unnecessary with that negotiation in place.
         src = self._rtsp_url
         try:
-            session = async_get_clientsession(self.hass)
+            session, base_url = go2rtc_endpoint(self.hass)
             async with session.put(
-                "http://127.0.0.1:1984/api/streams",
+                f"{base_url}/api/streams",
                 params={"name": name, "src": src},
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
@@ -721,15 +736,15 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 else:
                     _LOGGER.debug("Registered go2rtc stream: %s -> %s", name, src)
         except Exception:
-            _LOGGER.debug("go2rtc unavailable — backchannel inactive (RTSP/HLS still works)")
+            _LOGGER.debug("go2rtc unavailable — backchannel inactive (RTSP/HLS still works)", exc_info=True)
 
     async def _deregister_go2rtc_stream(self) -> None:
         """Remove our stream registration from go2rtc on shutdown."""
         name = f"comelit_man_{self.config_entry.entry_id}"
         with contextlib.suppress(Exception):
-            session = async_get_clientsession(self.hass)
+            session, base_url = go2rtc_endpoint(self.hass)
             async with session.delete(
-                "http://127.0.0.1:1984/api/streams",
+                f"{base_url}/api/streams",
                 params={"name": name},
                 timeout=aiohttp.ClientTimeout(total=5),
             ):

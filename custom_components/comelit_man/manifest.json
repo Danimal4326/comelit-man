@@ -1,6 +1,9 @@
 {
   "domain": "comelit_man",
   "name": "Comelit Man",
+  "after_dependencies": [
+    "go2rtc"
+  ],
   "codeowners": [
     "@mnestrud"
   ],
@@ -26,5 +29,5 @@
     "aiohttp>=3.9,<4",
     "av>=12.0.0"
   ],
-  "version": "1.5.1"
+  "version": "1.5.2"
 }

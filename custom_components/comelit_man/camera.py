@@ -16,7 +16,6 @@ from homeassistant.components.camera.webrtc import (
     WebRTCSendMessage,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from webrtc_models import RTCIceCandidateInit
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
 
 from .camera_utils import get_rtsp_url
 from .const import DOMAIN, MANUFACTURER
-from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
+from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator, go2rtc_endpoint
 from .entity import ComelitEntity
 from .models import Camera as CameraModel
 from .models import PushEvent
@@ -239,10 +238,10 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         WebRTC candidate" and killed the session (observed live 2026-08-27).
         """
         name = f"comelit_man_{self._entry_id}"
-        session = async_get_clientsession(self.hass)
+        session, base_url = go2rtc_endpoint(self.hass)
         try:
             ws = await session.ws_connect(
-                f"http://127.0.0.1:1984/api/ws?src={name}",
+                f"{base_url}/api/ws?src={name}",
                 timeout=aiohttp.ClientWSTimeout(ws_close=5.0),
             )
         except Exception as err:
