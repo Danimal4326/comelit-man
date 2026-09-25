@@ -39,7 +39,9 @@ def camera() -> ComelitIntercomCamera:
     coordinator.video_session = None
     coordinator.device_config = MagicMock()
     coordinator._video_ready_event = asyncio.Event()
-    coordinator.async_ensure_video = AsyncMock()
+    coordinator.async_ensure_video = AsyncMock(return_value=False)
+    coordinator.async_stop_video = AsyncMock()
+    coordinator.inbound_ring_pending = False
     cam = ComelitIntercomCamera(coordinator, "test_entry")
     return cam
 
@@ -590,6 +592,90 @@ class TestWebRtcSignaling:
             await offer
         session.ws_connect.assert_not_awaited()
         assert "sess_c" not in camera._pending_candidates
+
+    async def _open_view(self, camera, session_id, *, started):
+        camera.coordinator.async_ensure_video = AsyncMock(return_value=started)
+        ws = _FakeWs([])
+        with patch(
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
+        ):
+            await camera.async_handle_async_webrtc_offer("sdp", session_id, lambda m: None)
+
+    @pytest.mark.asyncio
+    async def test_last_viewer_leaving_hangs_up_viewer_started_call(self, camera):
+        _wire_hass(camera)
+        camera.coordinator.video_session = MagicMock()
+        await self._open_view(camera, "v1", started=True)
+        with patch("custom_components.comelit_man.camera.VIEWER_HANGUP_DELAY", 0):
+            camera.close_webrtc_session("v1")
+            await camera._hangup_task
+        camera.coordinator.request_video_stop.assert_called_once()
+        camera.coordinator.async_stop_video.assert_awaited_once()
+        assert camera._viewer_started_video is False
+
+    @pytest.mark.asyncio
+    async def test_call_not_started_by_viewer_is_left_running(self, camera):
+        """A call from the Start button or a ring keeps running after the viewer leaves."""
+        _wire_hass(camera)
+        camera.coordinator.video_session = MagicMock()
+        await self._open_view(camera, "v2", started=False)
+        camera.close_webrtc_session("v2")
+        await asyncio.sleep(0)
+        assert camera._hangup_task is None
+        camera.coordinator.async_stop_video.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reopening_within_grace_period_keeps_call(self, camera):
+        _wire_hass(camera)
+        camera.coordinator.video_session = MagicMock()
+        await self._open_view(camera, "v3", started=True)
+        camera.close_webrtc_session("v3")
+        pending = camera._hangup_task
+        await self._open_view(camera, "v4", started=False)
+        await asyncio.sleep(0)
+        assert pending.cancelled()
+        camera.coordinator.async_stop_video.assert_not_awaited()
+        assert camera._viewer_started_video is True
+        camera._cancel_hangup()
+        camera._webrtc_sessions.pop("v4")[1].cancel()
+
+    @pytest.mark.asyncio
+    async def test_other_viewer_still_watching_defers_hangup(self, camera):
+        _wire_hass(camera)
+        camera.coordinator.video_session = MagicMock()
+        await self._open_view(camera, "v5", started=True)
+        await self._open_view(camera, "v6", started=False)
+        camera.close_webrtc_session("v5")
+        assert camera._hangup_task is None
+        with patch("custom_components.comelit_man.camera.VIEWER_HANGUP_DELAY", 0):
+            camera.close_webrtc_session("v6")
+            await camera._hangup_task
+        camera.coordinator.async_stop_video.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_hangup_skipped_when_viewer_returns_or_ring_pending(self, camera):
+        _wire_hass(camera)
+        # A viewer reappears after the task was scheduled but before it fires.
+        camera._viewer_started_video = True
+        camera._pending_candidates["late"] = []
+        with patch("custom_components.comelit_man.camera.VIEWER_HANGUP_DELAY", 0):
+            await camera._hangup_after_last_viewer()
+        assert camera._viewer_started_video is True
+        camera._pending_candidates.clear()
+        # A doorbell ring took over the session — never cut the visitor off.
+        camera.coordinator.video_session = MagicMock()
+        camera.coordinator.inbound_ring_pending = True
+        with patch("custom_components.comelit_man.camera.VIEWER_HANGUP_DELAY", 0):
+            await camera._hangup_after_last_viewer()
+        camera.coordinator.async_stop_video.assert_not_awaited()
+        # Session already ended on its own.
+        camera._viewer_started_video = True
+        camera.coordinator.inbound_ring_pending = False
+        camera.coordinator.video_session = None
+        with patch("custom_components.comelit_man.camera.VIEWER_HANGUP_DELAY", 0):
+            await camera._hangup_after_last_viewer()
+        camera.coordinator.async_stop_video.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_video_start_failure_sends_error_without_go2rtc(self, camera):

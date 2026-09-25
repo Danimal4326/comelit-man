@@ -9,6 +9,7 @@
 ### New features
 
 - **Opening the camera starts the intercom call** — the intercom only streams during a call, so the camera view (WebRTC) used to connect to an empty stream. A WebRTC offer now starts a video session when none is running, or waits for one already starting; the session then follows its usual 120 s timeout / restart-while-watched lifecycle
+- **Closing the camera ends the call** — when the last viewer of a call that the camera view started goes away, the intercom call is hung up after a 5 s grace period instead of running to its 120 s timeout. Calls started by a doorbell ring or the Start button are left alone
 
 ## 1.5.2
 

@@ -33,6 +33,10 @@ from .placeholder import PLACEHOLDER_JPEG
 
 _LOGGER = logging.getLogger(__name__)
 
+# Grace period before hanging up a viewer-started call once the last viewer
+# leaves — a page refresh or reopening the dialog reuses the running call.
+VIEWER_HANGUP_DELAY = 5.0
+
 PARALLEL_UPDATES = 0
 
 
@@ -128,6 +132,10 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         # Client candidates that trickle in while the intercom call is still
         # starting (before the go2rtc session exists): session_id -> candidates
         self._pending_candidates: dict[str, list[str]] = {}
+        # True while the running call was started by a WebRTC viewer (not a
+        # ring or the Start button), so closing the last viewer may end it.
+        self._viewer_started_video = False
+        self._hangup_task: asyncio.Task[None] | None = None
 
     @property
     def is_streaming(self) -> bool:
@@ -245,8 +253,10 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         # finds a stream that already carries video.  The browser keeps
         # trickling candidates meanwhile; buffer them until go2rtc is up.
         self._pending_candidates[session_id] = []
+        self._cancel_hangup()
         try:
-            await self.coordinator.async_ensure_video()
+            if await self.coordinator.async_ensure_video():
+                self._viewer_started_video = True
         except Exception as err:
             self._pending_candidates.pop(session_id, None)
             _LOGGER.warning("Could not start intercom video for WebRTC viewer: %s", err)
@@ -331,6 +341,33 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
                 await ws.close()
 
         self.hass.async_create_background_task(_close(), f"comelit-webrtc-close-{session_id}")
+        if self._viewer_started_video and not self._webrtc_sessions and not self._pending_candidates:
+            self._cancel_hangup()
+            self._hangup_task = self.hass.async_create_background_task(
+                self._hangup_after_last_viewer(), "comelit-webrtc-hangup"
+            )
+
+    def _cancel_hangup(self) -> None:
+        if self._hangup_task is not None and not self._hangup_task.done():
+            self._hangup_task.cancel()
+        self._hangup_task = None
+
+    async def _hangup_after_last_viewer(self) -> None:
+        """End a viewer-started call once nobody has watched it for a moment.
+
+        Without this the intercom stays in a call until the session's own
+        120 s timeout.  Calls started by a ring (or still ringing) are left
+        alone — hanging those up would cut the visitor off.
+        """
+        await asyncio.sleep(VIEWER_HANGUP_DELAY)
+        if self._webrtc_sessions or self._pending_candidates:
+            return
+        self._viewer_started_video = False
+        if self.coordinator.video_session is None or self.coordinator.inbound_ring_pending:
+            return
+        _LOGGER.debug("Last WebRTC viewer left — ending intercom call")
+        self.coordinator.request_video_stop()
+        await self.coordinator.async_stop_video()
 
     def _on_push(self, event: PushEvent) -> None:
         """Handle push events — no auto-start; user controls video via button or automation."""

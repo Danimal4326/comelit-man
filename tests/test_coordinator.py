@@ -1347,14 +1347,14 @@ class TestEnsureVideo:
     @pytest.mark.asyncio
     async def test_starts_video_when_idle(self):
         coord = self._coord()
-        await coord.async_ensure_video()
+        assert await coord.async_ensure_video() is True
         coord.async_start_video.assert_awaited_once_with(by_user=True)
 
     @pytest.mark.asyncio
     async def test_noop_when_session_active(self):
         coord = self._coord()
         coord._video_session = MagicMock()
-        await coord.async_ensure_video()
+        assert await coord.async_ensure_video() is False
         coord.async_start_video.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1365,7 +1365,7 @@ class TestEnsureVideo:
         await asyncio.sleep(0)
         assert not waiter.done()
         coord._video_ready_event.set()
-        await waiter
+        assert await waiter is False
         coord.async_start_video.assert_not_awaited()
         coord._video_start_lock.release()
 
@@ -1379,6 +1379,15 @@ class TestEnsureVideo:
         ):
             await coord.async_ensure_video()
         coord._video_start_lock.release()
+
+
+class TestInboundRingPending:
+    def test_reflects_pending_ring(self):
+        coord = _make_coordinator()
+        coord._pending_inbound_ring = None
+        assert coord.inbound_ring_pending is False
+        coord._pending_inbound_ring = "00000100"
+        assert coord.inbound_ring_pending is True
 
 
 class TestGo2RtcEndpoint:
