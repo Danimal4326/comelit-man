@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.4
+
+### Maintenance
+
+- **Fork metadata** — the manifest's documentation and issue-tracker links (shown in Home Assistant and HACS) and the code owner now point to the Danimal4326/comelit-man fork; README notes the fork and gives its HACS custom-repository URL
+
 ## 1.5.3
 
 ### Bug fixes

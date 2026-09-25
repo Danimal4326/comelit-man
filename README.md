@@ -2,6 +2,8 @@
 
 Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. Communicates via the ICONA Bridge TCP protocol — no cloud required.
 
+> Fork of [mnestrud/comelit-man](https://github.com/mnestrud/comelit-man) with fixes for Home Assistant's built-in go2rtc, door opening when Home Assistant's intercom sub-address differs from the relay output, and camera-driven intercom calls.
+
 ## Features
 
 - **Remote door opening** — open doors/gates from Home Assistant
@@ -36,7 +38,7 @@ The integration communicates via the **ICONA Bridge TCP protocol** on port 64100
 
 ### HACS (Recommended)
 
-1. Add this repository as a custom repository in HACS
+1. Add `https://github.com/Danimal4326/comelit-man` as a custom repository (type: Integration) in HACS
 2. Install **Comelit Man**
 3. Restart Home Assistant
 
