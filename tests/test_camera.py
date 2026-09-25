@@ -593,6 +593,39 @@ class TestWebRtcSignaling:
         session.ws_connect.assert_not_awaited()
         assert "sess_c" not in camera._pending_candidates
 
+    @pytest.mark.asyncio
+    async def test_viewer_closing_during_call_start_still_hangs_up(self, camera):
+        """Open-then-close before video flows must not leave the call running for 120 s."""
+        _wire_hass(camera)
+        camera.coordinator.video_session = MagicMock()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+            return True
+
+        camera.coordinator.async_ensure_video = AsyncMock(side_effect=slow_start)
+        session = MagicMock()
+        session.ws_connect = AsyncMock()
+        with (
+            patch(
+                "custom_components.comelit_man.camera.go2rtc_endpoint",
+                return_value=(session, "http://localhost:11984"),
+            ),
+            patch("custom_components.comelit_man.camera.VIEWER_HANGUP_DELAY", 0),
+        ):
+            offer = asyncio.ensure_future(camera.async_handle_async_webrtc_offer("sdp", "sess_q", lambda m: None))
+            await started.wait()
+            camera.close_webrtc_session("sess_q")
+            assert camera._hangup_task is None  # call not marked viewer-started yet
+            release.set()
+            await offer
+            await camera._hangup_task
+        session.ws_connect.assert_not_awaited()
+        camera.coordinator.async_stop_video.assert_awaited_once()
+
     async def _open_view(self, camera, session_id, *, started):
         camera.coordinator.async_ensure_video = AsyncMock(return_value=started)
         ws = _FakeWs([])
