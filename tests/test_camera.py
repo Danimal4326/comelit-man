@@ -534,6 +534,64 @@ class TestWebRtcSignaling:
         await asyncio.sleep(0)
 
     @pytest.mark.asyncio
+    async def test_candidates_during_video_start_are_forwarded_after_offer(self, camera):
+        """Browser candidates trickled while the call starts reach go2rtc, after the offer."""
+        from webrtc_models import RTCIceCandidateInit
+
+        _wire_hass(camera)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+
+        camera.coordinator.async_ensure_video = AsyncMock(side_effect=slow_start)
+        ws = _FakeWs([])
+        with patch(
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(_session_with_ws(ws), "http://localhost:11984"),
+        ):
+            offer = asyncio.ensure_future(camera.async_handle_async_webrtc_offer("sdp", "sess_b", lambda m: None))
+            await started.wait()
+            await camera.async_on_webrtc_candidate(
+                "sess_b", RTCIceCandidateInit("candidate:1 1 udp 1 1.2.3.4 1 typ host")
+            )
+            release.set()
+            await offer
+        assert ws.sent == [
+            {"type": "webrtc/offer", "value": "sdp"},
+            {"type": "webrtc/candidate", "value": "candidate:1 1 udp 1 1.2.3.4 1 typ host"},
+        ]
+        camera.close_webrtc_session("sess_b")
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_close_during_video_start_skips_go2rtc(self, camera):
+        _wire_hass(camera)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await release.wait()
+
+        camera.coordinator.async_ensure_video = AsyncMock(side_effect=slow_start)
+        session = MagicMock()
+        session.ws_connect = AsyncMock()
+        with patch(
+            "custom_components.comelit_man.camera.go2rtc_endpoint",
+            return_value=(session, "http://localhost:11984"),
+        ):
+            offer = asyncio.ensure_future(camera.async_handle_async_webrtc_offer("sdp", "sess_c", lambda m: None))
+            await started.wait()
+            camera.close_webrtc_session("sess_c")
+            release.set()
+            await offer
+        session.ws_connect.assert_not_awaited()
+        assert "sess_c" not in camera._pending_candidates
+
+    @pytest.mark.asyncio
     async def test_video_start_failure_sends_error_without_go2rtc(self, camera):
         _wire_hass(camera)
         camera.coordinator.async_ensure_video = AsyncMock(side_effect=RuntimeError("UDPM timeout"))

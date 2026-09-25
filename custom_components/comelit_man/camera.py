@@ -125,6 +125,9 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         self._remove_state_cb: Callable[[], None] | None = None
         # Active go2rtc WS signaling sessions: session_id -> (ws, listen task)
         self._webrtc_sessions: dict[str, tuple[aiohttp.ClientWebSocketResponse, asyncio.Task[None]]] = {}
+        # Client candidates that trickle in while the intercom call is still
+        # starting (before the go2rtc session exists): session_id -> candidates
+        self._pending_candidates: dict[str, list[str]] = {}
 
     @property
     def is_streaming(self) -> bool:
@@ -239,12 +242,18 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         """
         # Viewing the camera starts the intercom call — there is no video
         # to relay otherwise.  Done before go2rtc connects so its RTSP pull
-        # finds a stream that already carries video.
+        # finds a stream that already carries video.  The browser keeps
+        # trickling candidates meanwhile; buffer them until go2rtc is up.
+        self._pending_candidates[session_id] = []
         try:
             await self.coordinator.async_ensure_video()
         except Exception as err:
+            self._pending_candidates.pop(session_id, None)
             _LOGGER.warning("Could not start intercom video for WebRTC viewer: %s", err)
             send_message(WebRTCError(code="video_start_failed", message=str(err)))
+            return
+        if session_id not in self._pending_candidates:
+            _LOGGER.debug("WebRTC %s closed while video was starting", session_id)
             return
         name = f"comelit_man_{self._entry_id}"
         session, base_url = go2rtc_endpoint(self.hass)
@@ -254,6 +263,7 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
                 timeout=aiohttp.ClientWSTimeout(ws_close=5.0),
             )
         except Exception as err:
+            self._pending_candidates.pop(session_id, None)
             send_message(WebRTCError(code="go2rtc_error", message=str(err)))
             return
 
@@ -281,8 +291,11 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
 
         task = self.hass.async_create_background_task(listen(), f"comelit-webrtc-{session_id}")
         self._webrtc_sessions[session_id] = (ws, task)
+        buffered = self._pending_candidates.pop(session_id, [])
         try:
             await ws.send_json({"type": "webrtc/offer", "value": offer_sdp})
+            for candidate in buffered:
+                await ws.send_json({"type": "webrtc/candidate", "value": candidate})
         except Exception as err:
             send_message(WebRTCError(code="go2rtc_error", message=str(err)))
             self.close_webrtc_session(session_id)
@@ -291,6 +304,10 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         """Forward a client ICE candidate to the go2rtc signaling session."""
         entry = self._webrtc_sessions.get(session_id)
         if entry is None:
+            pending = self._pending_candidates.get(session_id)
+            if pending is not None:
+                pending.append(candidate.candidate)
+                return
             _LOGGER.debug("Unknown WebRTC session %s — ignoring candidate", session_id)
             return
         ws, _task = entry
@@ -302,6 +319,7 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
 
     def close_webrtc_session(self, session_id: str) -> None:
         """Close a go2rtc signaling session (called on WS unsubscribe)."""
+        self._pending_candidates.pop(session_id, None)
         entry = self._webrtc_sessions.pop(session_id, None)
         if entry is None:
             return
