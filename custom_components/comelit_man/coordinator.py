@@ -45,6 +45,9 @@ RING_DEDUP_WINDOW = 120.0
 # A device 0x1840/0x0000 (idle) counts as a missed call only when it follows
 # a ring this recently; otherwise it is video-teardown / CTPP-init tail.
 MISSED_CALL_WINDOW = 45.0
+# How long a viewer waits for a video start that is already in flight.  The
+# device's own UDPM negotiation gives up after ~35 s.
+VIDEO_START_WAIT = 45.0
 
 
 def go2rtc_endpoint(hass: HomeAssistant) -> tuple[aiohttp.ClientSession, str]:
@@ -496,6 +499,32 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             except Exception:
                 await self._ensure_vip_listener()
                 raise
+
+    async def async_ensure_video(self) -> bool:
+        """Make sure a video session is running for a viewer that just connected.
+
+        The intercom only streams during a call, so opening the camera with
+        no session would show nothing.  Starts one when idle, or waits for a
+        start already in flight (a second viewer, a ring, the Start button).
+        Once started, the session's normal lifecycle applies: it times out
+        after VIDEO_SESSION_TIMEOUT and auto-restarts only while watched.
+
+        Returns True only when this call started the session, so the caller
+        knows the call is its own to hang up.
+        """
+        if self._video_session is not None:
+            return False
+        if self._video_start_lock.locked():
+            async with asyncio.timeout(VIDEO_START_WAIT):
+                await self._video_ready_event.wait()
+            return False
+        await self.async_start_video(by_user=True)
+        return True
+
+    @property
+    def inbound_ring_pending(self) -> bool:
+        """Return True while an unanswered doorbell ring owns the session."""
+        return self._pending_inbound_ring is not None
 
     def _on_video_call_end(self) -> None:
         """Called by VideoCallSession when the device sends CALL_END."""

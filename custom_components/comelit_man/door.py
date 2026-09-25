@@ -54,7 +54,7 @@ async def open_door(
             await client.connect()
             await authenticate(client, token)
             ctpp = await open_ctpp_channel(client, config)
-        await _open_door_on_channel(client, ctpp, config.apt_address, door)
+        await _open_door_on_channel(client, ctpp, config, door)
         extra_message = "(regular path)"
         if opened_channel is False:
             extra_message = "(fast path)"
@@ -101,16 +101,22 @@ async def open_ctpp_channel(
         raise DoorOpenError(f"Failed to open door: {e}") from e
 
 
-async def _open_door_on_channel(client: IconaBridgeClient, channel: Channel, apt_addr: str, door: Door) -> None:
+async def _open_door_on_channel(client: IconaBridgeClient, channel: Channel, config: DeviceConfig, door: Door) -> None:
     """Regular-door open sequence on an already-initialized CTPP channel.
 
     OPEN + CONFIRM  →  door_init + drain 2 resps  →  OPEN + CONFIRM.
+
+    Regular-door frames are sent from our registered address (the one the
+    CTPP channel was opened with); actuator frames have no separate relay
+    field, so they keep addressing the relay as apt-address + output-index.
     """
+    apt_addr = config.apt_address
+    our_addr = f"{config.apt_address}{config.apt_subaddress}"
     # Phase B: Open door + confirm
     init_open = encode_actuator_init(apt_addr, door.output_index, door.apt_address)
     if door.is_actuator is False:
-        await _send_open_and_confirm(client, channel, apt_addr, door)
-        init_open = encode_door_init(apt_addr, door.output_index, door.apt_address)
+        await _send_open_and_confirm(client, channel, our_addr, door)
+        init_open = encode_door_init(our_addr, door.output_index, door.apt_address)
     # Phase C: Door-specific init
     await client.send_binary(channel, init_open)
     for i in range(2):
@@ -123,7 +129,7 @@ async def _open_door_on_channel(client: IconaBridgeClient, channel: Channel, apt
 
     # Phase D: Open door + confirm again
     if door.is_actuator is False:
-        await _send_open_and_confirm(client, channel, apt_addr, door)
+        await _send_open_and_confirm(client, channel, our_addr, door)
     else:
         await _send_open_and_confirm_for_actuator(client, channel, apt_addr, door)
 
@@ -131,17 +137,17 @@ async def _open_door_on_channel(client: IconaBridgeClient, channel: Channel, apt
 async def _send_open_and_confirm(
     client: IconaBridgeClient,
     channel: Channel,
-    apt_addr: str,
+    our_addr: str,
     door: Door,
 ) -> None:
     """Send OPEN_DOOR followed by OPEN_DOOR_CONFIRM."""
     await client.send_binary(
         channel,
-        encode_open_door(MessageType.OPEN_DOOR, apt_addr, door.output_index, door.apt_address),
+        encode_open_door(MessageType.OPEN_DOOR, our_addr, door.apt_address),
     )
     await client.send_binary(
         channel,
-        encode_open_door(MessageType.OPEN_DOOR_CONFIRM, apt_addr, door.output_index, door.apt_address),
+        encode_open_door(MessageType.OPEN_DOOR_CONFIRM, our_addr, door.apt_address),
     )
 
 

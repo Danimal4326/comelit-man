@@ -185,28 +185,40 @@ def encode_ctpp_init(apt_address: str, apt_subaddress: int, timestamp: int | Non
 
 def encode_open_door(
     msg_type: MessageType,
-    apt_address: str,
-    output_index: int,
+    source_address: str,
     door_apt_address: str,
 ) -> bytes:
-    """Encode an OPEN_DOOR or OPEN_DOOR_CONFIRM message (Phase B/D)."""
+    """Encode an OPEN_DOOR or OPEN_DOOR_CONFIRM message (Phase B/D).
+
+    ``source_address`` is the sender's registered ViP address (apt-address +
+    apt-subaddress) — the same field the Android app fills with its own
+    address in the PCAP-verified in-call door open (see
+    ``encode_door_open_during_video``).
+    """
     buf = bytearray()
     buf += struct.pack("<H", msg_type)
     buf += bytes([0x5C, 0x8B])
     buf += bytes([0x2C, 0x74, 0x00, 0x00])
     buf += bytes([0xFF, 0xFF, 0xFF, 0xFF])
-    buf += _null_terminated(f"{apt_address}{output_index}")
+    buf += _null_terminated(source_address)
     buf += _null_terminated(door_apt_address)
     buf += b"\x00"
     return bytes(buf)
 
 
 def encode_door_init(
-    apt_address: str,
+    source_address: str,
     output_index: int,
     door_apt_address: str,
 ) -> bytes:
-    """Encode the door-specific init message (Phase C of door open)."""
+    """Encode the door-specific init message (Phase C of door open).
+
+    The relay is selected by the explicit ``output_index`` field; the address
+    pair is sender (``source_address``, apt-address + apt-subaddress) then
+    door.  Using apt-address + output-index as the sender only works where
+    the two coincide — other firmware silently drops frames from an address
+    that has no registration.
+    """
     buf = bytearray()
     buf += bytes([0xC0, 0x18, 0x70, 0xAB])
     buf += bytes([0x29, 0x9F, 0x00, 0x0D])
@@ -215,7 +227,7 @@ def encode_door_init(
     buf += b"\x00"
     buf += struct.pack("<I", output_index)
     buf += bytes([0xFF, 0xFF, 0xFF, 0xFF])
-    buf += _null_terminated(f"{apt_address}{output_index}")
+    buf += _null_terminated(source_address)
     buf += _null_terminated(door_apt_address)
     buf += b"\x00"
     return bytes(buf)

@@ -108,6 +108,27 @@ class TestOpenDoorFastPath:
         mock_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_regular_door_frames_sent_from_our_address(self):
+        """Door frames carry apt-address + apt-subaddress as sender, not + output-index.
+
+        Firmware whose app sub-address differs from the relay's output index
+        silently ignores frames from the unregistered apt+output address.
+        """
+        channel = MagicMock()
+        client = _make_client(ctpp_channel=channel)
+        config = _make_config()
+        config.apt_subaddress = 3
+        door = _make_door(output_index=1)
+
+        await open_door(HOST, PORT, TOKEN, client, config, door)
+
+        our_addr = f"{config.apt_address}3".encode() + b"\x00"
+        relay_addr = f"{config.apt_address}1".encode() + b"\x00"
+        for c in client.send_binary.call_args_list:
+            assert our_addr in c.args[1]
+            assert relay_addr not in c.args[1]
+
+    @pytest.mark.asyncio
     async def test_sends_actuator_sequence_for_actuator_door(self):
         """open_door routes actuator doors through the actuator-specific sequence."""
         channel = MagicMock()
