@@ -52,7 +52,7 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 | `tests/test_*.py` | One file per source module |
 | `.github/workflows/validate.yml` | CI: HACS, hassfest, ruff check+format, mypy, pytest |
 
-Platforms: `BINARY_SENSOR, BUTTON, CAMERA, EVENT, IMAGE, LOCK, SENSOR` | Min HA: `2026.1.0` | Repo: `https://github.com/mnestrud/comelit-man`
+Platforms: `BINARY_SENSOR, BUTTON, CAMERA, EVENT, IMAGE, LOCK, SENSOR` | Min HA: `2026.1.0` | Repo: `https://github.com/Danimal4326/comelit-man` (fork of `mnestrud/comelit-man`)
 
 ---
 

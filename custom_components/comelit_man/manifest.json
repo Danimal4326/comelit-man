@@ -5,7 +5,7 @@
     "go2rtc"
   ],
   "codeowners": [
-    "@mnestrud"
+    "@Danimal4326"
   ],
   "config_flow": true,
   "dependencies": [
@@ -21,13 +21,13 @@
       "hostname": "*comelit*"
     }
   ],
-  "documentation": "https://github.com/mnestrud/comelit-man",
+  "documentation": "https://github.com/Danimal4326/comelit-man",
   "integration_type": "device",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/mnestrud/comelit-man/issues",
+  "issue_tracker": "https://github.com/Danimal4326/comelit-man/issues",
   "requirements": [
     "aiohttp>=3.9,<4",
     "av>=12.0.0"
   ],
-  "version": "1.5.3"
+  "version": "1.5.4"
 }
