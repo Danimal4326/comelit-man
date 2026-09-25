@@ -264,6 +264,7 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
             return
         if session_id not in self._pending_candidates:
             _LOGGER.debug("WebRTC %s closed while video was starting", session_id)
+            self._schedule_hangup_if_unwatched()
             return
         name = f"comelit_man_{self._entry_id}"
         session, base_url = go2rtc_endpoint(self.hass)
@@ -329,18 +330,29 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
 
     def close_webrtc_session(self, session_id: str) -> None:
         """Close a go2rtc signaling session (called on WS unsubscribe)."""
-        self._pending_candidates.pop(session_id, None)
+        was_starting = self._pending_candidates.pop(session_id, None) is not None
         entry = self._webrtc_sessions.pop(session_id, None)
-        if entry is None:
+        if entry is not None:
+            ws, task = entry
+            task.cancel()
+
+            async def _close() -> None:
+                with contextlib.suppress(Exception):
+                    await ws.close()
+
+            self.hass.async_create_background_task(_close(), f"comelit-webrtc-close-{session_id}")
+        elif not was_starting:
             return
-        ws, task = entry
-        task.cancel()
+        self._schedule_hangup_if_unwatched()
 
-        async def _close() -> None:
-            with contextlib.suppress(Exception):
-                await ws.close()
+    def _schedule_hangup_if_unwatched(self) -> None:
+        """Arm the hangup timer when a viewer-started call has no viewers left.
 
-        self.hass.async_create_background_task(_close(), f"comelit-webrtc-close-{session_id}")
+        Reached both from a normal close and from an offer whose viewer
+        closed while the call was still starting — that close found the
+        session only in the candidate buffer, before the call was marked
+        viewer-started, so the offer re-checks once the call is up.
+        """
         if self._viewer_started_video and not self._webrtc_sessions and not self._pending_candidates:
             self._cancel_hangup()
             self._hangup_task = self.hass.async_create_background_task(
