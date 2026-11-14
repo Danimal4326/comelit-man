@@ -37,6 +37,13 @@ _LOGGER = logging.getLogger(__name__)
 # leaves — a page refresh or reopening the dialog reuses the running call.
 VIEWER_HANGUP_DELAY = 5.0
 
+# A call started for a stream_source() consumer (HomeKit's ffmpeg, HA's HLS
+# worker for Google) is hung up once no RTSP client has been connected for
+# this long. The first client gets STREAM_CONNECT_GRACE to show up.
+STREAM_IDLE_HANGUP_DELAY = 10.0
+STREAM_CONNECT_GRACE = 20.0
+STREAM_IDLE_POLL = 1.0
+
 PARALLEL_UPDATES = 0
 
 
@@ -136,6 +143,7 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         # ring or the Start button), so closing the last viewer may end it.
         self._viewer_started_video = False
         self._hangup_task: asyncio.Task[None] | None = None
+        self._stream_hangup_task: asyncio.Task[None] | None = None
 
     @property
     def is_streaming(self) -> bool:
@@ -150,25 +158,31 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         return self.coordinator.video_session is not None
 
     async def stream_source(self) -> str | None:
-        """Return the RTSP URL, waiting briefly if a session is starting.
+        """Return the RTSP URL, starting the intercom call if none is running.
 
-        Gating on `_video_ready_event` prevents HA's stream worker and
-        go2rtc from connecting during the 2-3 s CTPP handshake window —
-        if they connect before video RTP flows, ffmpeg's demuxer errors
-        with "Stream ended; no additional packets" and HA backs off ~10 s
-        before retrying, which is the dominant delay in time-to-first-frame.
+        HomeKit (ffmpeg) and Google Assistant (HA's HLS worker) pull video
+        through this method instead of the WebRTC offer path, and the
+        intercom only streams during a call — so, like a WebRTC viewer, a
+        pull with no session starts one.  The URL is returned only once the
+        session is ready: a consumer connecting during the 2-3 s CTPP
+        handshake would probe a video-less stream and back off ~10 s.
 
-        If a session is already active, return the URL immediately.
-        If one is in flight, wait up to 5 s for it.  Return None if
-        nothing is starting — HA falls back to JPEG polling in that case.
+        This camera has a native WebRTC implementation, so HA's provider
+        discovery never calls stream_source(); only real stream consumers
+        do.  A call started here is hung up by _hangup_when_stream_idle.
         """
         if self.coordinator.video_session is not None:
             return self.coordinator.rtsp_url
         try:
-            await asyncio.wait_for(self.coordinator._video_ready_event.wait(), timeout=5.0)
-            return self.coordinator.rtsp_url
-        except TimeoutError:
+            started = await self.coordinator.async_ensure_video()
+        except Exception as err:
+            _LOGGER.warning("Could not start intercom video for stream consumer: %s", err)
             return None
+        if self.coordinator.video_session is None:
+            return None
+        if started:
+            self._schedule_stream_idle_hangup()
+        return self.coordinator.rtsp_url
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         """Return the latest JPEG frame, or placeholder when video is off."""
@@ -201,6 +215,9 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         if self._remove_state_cb:
             self._remove_state_cb()
             self._remove_state_cb = None
+        if self._stream_hangup_task is not None:
+            self._stream_hangup_task.cancel()
+            self._stream_hangup_task = None
         await self.coordinator.async_stop_video()
 
     async def _async_video_state_changed(self) -> None:
@@ -378,6 +395,45 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         if self.coordinator.video_session is None or self.coordinator.inbound_ring_pending:
             return
         _LOGGER.debug("Last WebRTC viewer left — ending intercom call")
+        self.coordinator.request_video_stop()
+        await self.coordinator.async_stop_video()
+
+    def _schedule_stream_idle_hangup(self) -> None:
+        if self._stream_hangup_task is not None and not self._stream_hangup_task.done():
+            return
+        self._stream_hangup_task = self.hass.async_create_background_task(
+            self._hangup_when_stream_idle(), "comelit-stream-hangup"
+        )
+
+    async def _hangup_when_stream_idle(self) -> None:
+        """End a call started for a stream consumer once no RTSP client is left.
+
+        Unlike WebRTC viewers, HomeKit and HLS consumers give no close
+        callback — the RTSP client count is the only signal that they are
+        gone.  The count also covers go2rtc (which holds an RTSP client per
+        WebRTC viewer), so a dashboard viewer keeps the call up too.
+        Without this the call would run to its 120 s timeout.  Calls with
+        an unanswered ring are left alone, as in _hangup_after_last_viewer.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + STREAM_CONNECT_GRACE
+        idle_since: float | None = None
+        while self.coordinator.video_session is not None:
+            server = self.coordinator.rtsp_server
+            now = loop.time()
+            if server is not None and server.client_count > 0:
+                deadline = 0.0
+                idle_since = None
+            elif now >= deadline:
+                idle_since = idle_since if idle_since is not None else now
+                if now - idle_since >= STREAM_IDLE_HANGUP_DELAY:
+                    break
+            await asyncio.sleep(STREAM_IDLE_POLL)
+        else:
+            return
+        if self._webrtc_sessions or self._pending_candidates or self.coordinator.inbound_ring_pending:
+            return
+        _LOGGER.debug("No RTSP clients left — ending intercom call started for stream consumer")
         self.coordinator.request_video_stop()
         await self.coordinator.async_stop_video()
 

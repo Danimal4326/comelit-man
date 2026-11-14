@@ -123,32 +123,127 @@ async def test_stream_source_returns_url_when_session_active(camera):
     assert url == "rtsp://127.0.0.1:12345/intercom"
 
 
-@pytest.mark.asyncio
-async def test_stream_source_returns_none_when_no_session_and_timeout(camera):
-    """stream_source returns None when no session is active and the ready event times out."""
-    camera.coordinator.video_session = None
-    camera.coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
+def _start_session_on_ensure(camera, *, started=True):
+    async def ensure():
+        camera.coordinator.video_session = MagicMock()
+        return started
 
-    # Patch wait_for as a real coroutine so the Event.wait() coroutine it
-    # receives is properly closed (avoids "was never awaited" RuntimeWarning).
-    async def _timeout(coro, timeout=None):
-        coro.close()
-        raise TimeoutError
-
-    with patch("custom_components.comelit_man.camera.asyncio.wait_for", _timeout):
-        url = await camera.stream_source()
-    assert url is None
+    camera.coordinator.async_ensure_video = AsyncMock(side_effect=ensure)
 
 
 @pytest.mark.asyncio
-async def test_stream_source_returns_url_when_ready_event_fires(camera):
-    """stream_source returns the RTSP URL once _video_ready_event is set."""
-    camera.coordinator.video_session = None
+async def test_stream_source_starts_call_when_idle(camera):
+    """A stream consumer (HomeKit, HLS) with no session starts the intercom call."""
+    _wire_hass(camera)
     camera.coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
-    camera.coordinator._video_ready_event.set()
+    _start_session_on_ensure(camera)
 
     url = await camera.stream_source()
+
     assert url == "rtsp://127.0.0.1:12345/intercom"
+    camera.coordinator.async_ensure_video.assert_awaited_once()
+    assert camera._stream_hangup_task is not None
+    camera._stream_hangup_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_stream_source_joining_running_start_does_not_own_call(camera):
+    """Waiting on a start already in flight returns the URL but arms no hangup."""
+    camera.hass = MagicMock()
+    camera.coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
+    _start_session_on_ensure(camera, started=False)
+
+    assert await camera.stream_source() == "rtsp://127.0.0.1:12345/intercom"
+    camera.hass.async_create_background_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_source_returns_none_when_start_fails(camera):
+    camera.coordinator.async_ensure_video = AsyncMock(side_effect=RuntimeError("Not connected"))
+    assert await camera.stream_source() is None
+
+
+@pytest.mark.asyncio
+async def test_stream_source_returns_none_when_no_session_after_start(camera):
+    """A start that waited out without producing a session yields no URL."""
+    camera.coordinator.async_ensure_video = AsyncMock(return_value=False)
+    assert await camera.stream_source() is None
+
+
+class TestStreamIdleHangup:
+    """Calls started for stream consumers end once no RTSP client is left."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_timers(self):
+        with (
+            patch("custom_components.comelit_man.camera.STREAM_IDLE_POLL", 0),
+            patch("custom_components.comelit_man.camera.STREAM_IDLE_HANGUP_DELAY", 0),
+            patch("custom_components.comelit_man.camera.STREAM_CONNECT_GRACE", 0),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_hangs_up_after_last_client_leaves(self, camera):
+        camera.coordinator.video_session = MagicMock()
+        counts = iter([1, 1, 0])
+        type(camera.coordinator.rtsp_server).client_count = property(lambda _: next(counts, 0))
+
+        await camera._hangup_when_stream_idle()
+
+        camera.coordinator.request_video_stop.assert_called_once()
+        camera.coordinator.async_stop_video.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_waits_for_first_client_within_grace(self, camera):
+        """No hangup while the consumer is still connecting."""
+        camera.coordinator.video_session = MagicMock()
+        camera.coordinator.rtsp_server.client_count = 0
+        polls = 0
+
+        async def fake_sleep(_):
+            nonlocal polls
+            polls += 1
+            if polls == 3:
+                camera.coordinator.video_session = None
+
+        with (
+            patch("custom_components.comelit_man.camera.STREAM_CONNECT_GRACE", 3600),
+            patch("custom_components.comelit_man.camera.asyncio.sleep", fake_sleep),
+        ):
+            await camera._hangup_when_stream_idle()
+
+        camera.coordinator.async_stop_video.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_session_ending_on_its_own_stops_watch(self, camera):
+        camera.coordinator.video_session = None
+        await camera._hangup_when_stream_idle()
+        camera.coordinator.async_stop_video.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ring_or_webrtc_viewer_keeps_call(self, camera):
+        camera.coordinator.video_session = MagicMock()
+        camera.coordinator.rtsp_server.client_count = 0
+        camera.coordinator.inbound_ring_pending = True
+        await camera._hangup_when_stream_idle()
+
+        camera.coordinator.inbound_ring_pending = False
+        camera._webrtc_sessions["s"] = (MagicMock(), MagicMock())
+        await camera._hangup_when_stream_idle()
+
+        camera.coordinator.async_stop_video.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_only_one_watch_task(self, camera):
+        _wire_hass(camera)
+        camera.coordinator.video_session = MagicMock()
+        camera.coordinator.rtsp_server.client_count = 1
+        with patch("custom_components.comelit_man.camera.STREAM_IDLE_POLL", 3600):
+            camera._schedule_stream_idle_hangup()
+            first = camera._stream_hangup_task
+            camera._schedule_stream_idle_hangup()
+            assert camera._stream_hangup_task is first
+            first.cancel()
 
 
 # ---------------------------------------------------------------------------

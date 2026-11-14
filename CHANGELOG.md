@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.5
+
+### Bug fixes
+
+- **Live view works in HomeKit and Google Home** — those consumers pull video through `stream_source()` (HomeKit's ffmpeg, HA's HLS worker for Google) rather than the WebRTC offer path, and `stream_source()` returned nothing unless a call was already running, so their live view stayed blank outside a ring. A pull with no session now starts the intercom call, like opening the camera in a dashboard does, and returns the RTSP URL once the session is ready. Since these consumers give no close callback, the call is hung up once no RTSP client has been connected for 10 s (with a 20 s grace for the first client to connect); calls with an unanswered ring are left alone
+
 ## 1.5.4
 
 ### Maintenance
