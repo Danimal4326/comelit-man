@@ -548,6 +548,8 @@ def encode_door_open_during_video(
     entrance_addr: str,
     call_counter: int,
     relay_index: int,
+    *,
+    callee: str | None = None,
 ) -> bytes:
     """Encode a door open command for use on an active video CTPP channel.
 
@@ -558,7 +560,12 @@ def encode_door_open_during_video(
     Body structure (48 bytes):
       [LE16 0x1840] [LE32 counter] [BE16 0x000D] [BE16 0x002D]
       [entrance_addr padded to 10] [LE32 relay_index] [4x 0xFF]
-      [our_addr padded to 10] [entrance_addr padded to 10]
+      [our_addr padded to 10] [callee padded to 10]
+
+    The callee is the entrance for a call we started (manual viewing), but our
+    apartment base address during an incoming call — per an official-app
+    capture of an in-call open on an answered ring (cuchipandy/comelit-cuchicodex,
+    Apache-2.0).
 
     relay_index: the door's output_index from the device config (PCAP shows 1
     for the only door on that device; use door.output_index for our device).
@@ -574,7 +581,7 @@ def encode_door_open_during_video(
     buf += struct.pack("<I", relay_index)
     buf += b"\xff\xff\xff\xff"
     buf += our_b
-    buf += entr_b
+    buf += callee.encode("ascii").ljust(10, b"\x00")[:10] if callee is not None else entr_b
     return bytes(buf)
 
 

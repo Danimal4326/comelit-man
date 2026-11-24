@@ -23,6 +23,13 @@ from webrtc_models import RTCIceCandidateInit
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+try:  # HA 2026.11+: lets the built-in camera dialog offer a microphone
+    from homeassistant.components.camera import (  # type: ignore[attr-defined,unused-ignore]
+        CameraEntityCapabilities,
+    )
+except ImportError:  # pragma: no cover - older Home Assistant
+    CameraEntityCapabilities = None  # type: ignore[assignment,misc,unused-ignore]
+
 from .camera_utils import get_rtsp_url
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator, go2rtc_endpoint
@@ -131,6 +138,13 @@ class ComelitIntercomCamera(ComelitEntity, Camera):
         super().__init__(coordinator, entry_id)
         Camera.__init__(self)
         self._attr_unique_id = f"{entry_id}_intercom_camera"
+        # Talk-back goes browser mic → WebRTC → go2rtc → our RTSP ONVIF
+        # backchannel → device RTPC.  Declaring it lets HA 2026.11's own
+        # more-info dialog show a mic (WebRTC only, behind the Labs
+        # "two-way audio" preview).  The panel only plays it once the call
+        # is answered (Answer doorbell button / an answered ring).
+        if CameraEntityCapabilities is not None:
+            self._attr_camera_entity_capabilities = CameraEntityCapabilities(two_way_audio=True)
         self._remove_push_cb: Callable[[], None] | None = None
         self._remove_stop_video_cb: Callable[[], None] | None = None
         self._remove_state_cb: Callable[[], None] | None = None

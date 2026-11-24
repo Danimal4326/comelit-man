@@ -78,6 +78,9 @@ class VideoCallSession:
     10. Auto-timeout after ~120s
     """
 
+    # Class default so sessions built without __init__ (tests) read False.
+    _inbound: bool = False
+
     # Channel names opened by start() — cleaned up on stop without
     # disconnecting the shared client.
     _VIDEO_CHANNEL_NAMES = ("CTPP", "CSPB", "UDPM", "RTPC", "RTPC2", "RTPC_DEVICE", "RTPC_DEVICE_REEST")
@@ -121,6 +124,8 @@ class VideoCallSession:
         # Inbound-only: device RTPC placeholder registered during start_inbound().
         # Kept until answer_inbound() waits for it to open.
         self._inbound_device_rtpc: Channel | None = None
+        # True once start_inbound() runs: the call was initiated by a ring.
+        self._inbound: bool = False
         # Set by answer_inbound() before sending peer+call_accepted; the CTPP monitor
         # routes non-CALL_END 0x1840 messages here so the drain loop can ACK them
         # with the correct transform format instead of the monitor's own ACK path.
@@ -955,6 +960,7 @@ class VideoCallSession:
                     translation_key="video_call_failed",
                 )
 
+            self._inbound = True
             self._inbound_device_rtpc = client.register_placeholder_channel("RTPC_DEVICE")
 
             # Step 1: ACK ring with fresh_ts
@@ -1251,7 +1257,13 @@ class VideoCallSession:
             raise RuntimeError("No active video CTPP channel")
         async with self._ctpp_lock:
             self._call_counter += _CTR_INCR_BYTE4
-            payload = encode_door_open_during_video(our_addr, entrance_addr, self._call_counter, relay_index)
+            payload = encode_door_open_during_video(
+                our_addr,
+                entrance_addr,
+                self._call_counter,
+                relay_index,
+                callee=self._config.apt_address if self._inbound else None,
+            )
             await self._client.send_binary(ctpp, payload)
         _LOGGER.info(
             "Door open sent on video CTPP (relay=%d, counter=0x%08X)",

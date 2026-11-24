@@ -905,3 +905,35 @@ class TestWebRtcSignaling:
         await asyncio.sleep(0.05)
         assert ws.closed
         assert "sess7" not in camera._webrtc_sessions
+
+
+# ---------------------------------------------------------------------------
+# Two-way audio capability (HA 2026.11+)
+# ---------------------------------------------------------------------------
+
+
+def test_two_way_audio_capability_declared_when_supported():
+    """On HA with CameraEntityCapabilities the intercom camera declares talk-back."""
+    from dataclasses import dataclass
+
+    from custom_components.comelit_man import camera as camera_mod
+
+    @dataclass(frozen=True, kw_only=True)
+    class _Caps:
+        two_way_audio: bool = False
+
+    coordinator = MagicMock()
+    with patch.object(camera_mod, "CameraEntityCapabilities", _Caps):
+        cam = ComelitIntercomCamera(coordinator, "test_entry")
+    assert cam._attr_camera_entity_capabilities == _Caps(two_way_audio=True)
+
+
+def test_two_way_audio_capability_skipped_on_older_ha():
+    """Without CameraEntityCapabilities (HA < 2026.11) nothing is declared."""
+    from custom_components.comelit_man import camera as camera_mod
+
+    coordinator = MagicMock()
+    with patch.object(camera_mod, "CameraEntityCapabilities", None):
+        cam = ComelitIntercomCamera(coordinator, "test_entry")
+    caps = getattr(cam, "_attr_camera_entity_capabilities", None)
+    assert caps is None or not getattr(caps, "two_way_audio", False)

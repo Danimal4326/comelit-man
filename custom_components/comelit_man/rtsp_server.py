@@ -36,6 +36,7 @@ import asyncio
 import base64
 import contextlib
 import dataclasses
+import errno
 import logging
 import socket
 import struct
@@ -252,11 +253,21 @@ class LocalRtspServer:
         self._audio_sock.bind((self._bind_host, 0))
         self._audio_server_port = self._audio_sock.getsockname()[1]
 
-        self._server = await asyncio.start_server(
-            self._handle_client,
-            self._bind_host,
-            self._bind_port,
-        )
+        try:
+            self._server = await asyncio.start_server(
+                self._handle_client,
+                self._bind_host,
+                self._bind_port,
+            )
+        except OSError as err:
+            # A second config entry (e.g. monitor + door station) would collide
+            # on the default port.  The URL is registered with go2rtc at setup,
+            # so any free port works; keep the default for the first entry so
+            # a static go2rtc.yaml entry pointing at it stays valid.
+            if err.errno != errno.EADDRINUSE or self._bind_port == 0:
+                raise
+            _LOGGER.info("RTSP port %d in use — using a free port", self._bind_port)
+            self._server = await asyncio.start_server(self._handle_client, self._bind_host, 0)
         self._rtsp_port = self._server.sockets[0].getsockname()[1]
         self._running = True
 

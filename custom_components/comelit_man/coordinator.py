@@ -54,6 +54,11 @@ VIDEO_START_WAIT = 45.0
 # which keeps rings flowing on the same firmware.
 LEASE_REFRESH_INTERVAL = 120.0
 LEASE_RECYCLE_AFTER = 50 * 60.0
+# The panel only releases a door during a ring for the receiver that answered
+# it.  A door open during an unanswered ring answers first, opens in-call, and
+# hangs up this long after (unless someone is watching the camera).
+DOOR_RING_VIDEO_WAIT = 10.0
+DOOR_ANSWER_HANGUP_DELAY = 5.0
 
 
 def go2rtc_endpoint(hass: HomeAssistant) -> tuple[aiohttp.ClientSession, str]:
@@ -396,10 +401,25 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         if not self._config or not self._client:
             raise RuntimeError("Not connected")
+        # A ring's passive video may still be starting: wait for it, since the
+        # panel ignores a plain open while it rings.
+        if self._video_session is None and self._ring_recent() and self._video_start_lock.locked():
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(DOOR_RING_VIDEO_WAIT):
+                    await self._video_ready_event.wait()
         if self._video_session and self._video_session.active:
+            answered_for_door = False
+            if self._pending_inbound_ring is not None and not self._inbound_answered:
+                _LOGGER.info("Door open during an unanswered ring — answering first")
+                await self.async_answer_inbound()
+                answered_for_door = self._inbound_answered
             our_addr = f"{self._config.apt_address}{self._config.apt_subaddress}"
             entrance_addr = self._config.caller_address or our_addr
             await self._video_session.async_open_door_on_ctpp(our_addr, entrance_addr, door.output_index)
+            if answered_for_door:
+                self.config_entry.async_create_background_task(
+                    self.hass, self._hangup_after_door_open(), "comelit-door-hangup"
+                )
         else:
             try:
                 await open_door(self.host, self.port, self.token, self._client, self._config, door)
@@ -746,6 +766,19 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 )
             )
             _LOGGER.info("Inbound video ready (entrance=%s)", entrance_addr)
+
+    def _ring_recent(self) -> bool:
+        """True when a ring arrived within the missed-call window."""
+        return self._last_ring_mono is not None and time.monotonic() - self._last_ring_mono <= MISSED_CALL_WINDOW
+
+    async def _hangup_after_door_open(self) -> None:
+        """Hang up a call answered only to open the door, unless someone is watching."""
+        await asyncio.sleep(DOOR_ANSWER_HANGUP_DELAY)
+        if self._rtsp_server is not None and self._rtsp_server.client_count > 0:
+            _LOGGER.debug("Door opened in an answered ring; camera is watched — keeping the call")
+            return
+        self.request_video_stop()
+        await self.async_stop_video()
 
     async def async_answer_inbound(self) -> None:
         """Answer an active passive inbound call — send answer signals, start audio."""
