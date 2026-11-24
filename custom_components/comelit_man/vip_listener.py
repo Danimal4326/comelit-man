@@ -33,8 +33,7 @@ if TYPE_CHECKING:
 from .client import IconaBridgeClient
 from .ctpp import _CTR_INCR_BOTH
 from .models import DeviceConfig, PushEvent
-from .protocol import encode_call_response_ack
-from .video_call import _transform_device_ts
+from .protocol import ack_word, encode_call_response_ack, fin_word
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,10 +142,10 @@ class VipEventListener:
         self._config = config
         self._callback = callback
         # init_ts is the LE32 counter the coordinator sent in encode_ctpp_init.
-        # Renewal ACKs must use `init_ts + 0x01010000` (PCAP-verified: the
-        # client never derives a renewal ACK ts from the device's renewal ts —
-        # using device_ts causes the device to reject the ACK).  Event ACKs
-        # instead use _transform_device_ts(device_ts) — see _send_event_ack.
+        # Kept for diagnostics only: ACKs are now derived from each device
+        # frame with ack_word().  The old fixed `init_ts + 0x01010000` only
+        # matched the device's first renewal check; every later check got a
+        # wrong ACK, the device dropped the registration and rings stopped.
         self._init_ts = init_ts
         self._ack_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
         self._on_inbound_ring = on_inbound_ring
@@ -307,6 +306,11 @@ class VipEventListener:
         ):
             await self._send_event_ack(msg)
 
+        # An empty 0x1860 is the device closing one of its connections to us:
+        # close it back (FIN) so it doesn't keep retransmitting the close.
+        if prefix == PREFIX_VIP_EVENT and action == ACTION_IDLE:
+            await self._send_event_ack(msg, fin=True)
+
         # Detect incoming call / doorbell ring.
         #
         # When someone rings the doorbell, the device sends a CALL_FSM_STATUS_CHANGE
@@ -326,12 +330,14 @@ class VipEventListener:
         if prefix in (PREFIX_CALL_INIT, PREFIX_VIP_EVENT, PREFIX_VIDEO_EVENT):
             self._handle_vip_event(msg)
 
-    async def _send_event_ack(self, msg: dict[str, Any]) -> None:
-        """Send a single ACK (0x1800) for a device-initiated VIP event.
+    async def _send_event_ack(self, msg: dict[str, Any], fin: bool = False) -> None:
+        """Send a single ACK (0x1800), or FIN (0x1820), for a device VIP frame.
 
-        Timestamp: _transform_device_ts(device_ts) — PCAP2-verified for all
-        0x18C0/0x1840/0x1860 non-renewal events. This is distinct from renewal
-        ACKs which use init_ts + 0x01010000.
+        Word: ack_word(device_ts) — flip the connection's top bit, echo the
+        device's ack as our seq, acknowledge its seq + 1 (fin_word for a FIN:
+        seq not advanced).  For device-initiated connections this equals the
+        old _transform_device_ts(); unlike it, it is also right for frames on
+        a connection we opened.
 
         Callee: apt_addr (base address without subaddress digit).
         Caller: vip_address (apt_addr + subaddress digit).
@@ -339,14 +345,15 @@ class VipEventListener:
         apt_addr = self._config.apt_address
         apt_sub = self._config.apt_subaddress
         vip_address = f"{apt_addr}{apt_sub}"
-        ack_ts = _transform_device_ts(msg["timestamp"])
+        ack_ts = fin_word(msg["timestamp"]) if fin else ack_word(msg["timestamp"])
         try:
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(vip_address, apt_addr, ack_ts),
+                encode_call_response_ack(vip_address, apt_addr, ack_ts, prefix=0x1820 if fin else 0x1800),
             )
             _LOGGER.debug(
-                "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
+                "VIP: sent event %s (action=0x%04X, ts=0x%08X)",
+                "FIN" if fin else "ACK",
                 msg["action"],
                 ack_ts,
             )
@@ -381,22 +388,23 @@ class VipEventListener:
 
         Addresses are resolved from the renewal message itself at runtime — the
         device's binary VIP address may differ from config.apt_address.
-        Timestamp is `init_ts + 0x01010000` — see __init__ docstring.
+        The ACK word is ack_word() of the renewal's own counters — see __init__.
         """
         ack_caller, ack_callee = self._resolve_ack_addresses(msg["addresses"])
+        ack_ts = ack_word(msg["timestamp"])
         try:
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(ack_caller, ack_callee, self._ack_ts),
+                encode_call_response_ack(ack_caller, ack_callee, ack_ts),
             )
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(ack_caller, ack_callee, self._ack_ts, prefix=0x1820),
+                encode_call_response_ack(ack_caller, ack_callee, ack_ts, prefix=0x1820),
             )
-            _LOGGER.info(
+            _LOGGER.debug(
                 "VIP: sent renewal ACK pair (device_ts=0x%08X ack_ts=0x%08X caller=%s callee=%s)",
                 msg["timestamp"],
-                self._ack_ts,
+                ack_ts,
                 ack_caller,
                 ack_callee,
             )

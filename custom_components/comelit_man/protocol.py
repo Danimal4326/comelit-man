@@ -156,12 +156,51 @@ def is_json_body(body: bytes) -> bool:
 # --- Door open binary payloads ---
 
 
-def encode_ctpp_init(apt_address: str, apt_subaddress: int, timestamp: int | None = None) -> bytes:
+def ack_word(device_ts: int) -> int:
+    """Return the LE32 word for our ACK of a device CTP frame.
+
+    The 4 bytes after the prefix are [conn0, conn1, seq, ack].  An ACK flips
+    the top bit of conn0 (the peer's view of the same connection), echoes the
+    device's ack as our seq, and acknowledges the device's seq + 1.
+
+    Unlike ``init_ts + RENEWAL_ACK_INCREMENT`` this tracks the device's own
+    counters, so it stays valid for every periodic renewal check — not just the
+    first one after the init.  Matches the CTP framing used by
+    homebridge-comelit-doorbell (Apache-2.0), which keeps rings flowing on the
+    same 6701W/6741W firmware.
+    """
+    c0 = (device_ts & 0xFF) ^ 0x80
+    c1 = (device_ts >> 8) & 0xFF
+    seq = (device_ts >> 16) & 0xFF
+    ack = (device_ts >> 24) & 0xFF
+    return c0 | (c1 << 8) | (ack << 16) | (((seq + 1) & 0xFF) << 24)
+
+
+def fin_word(device_ts: int) -> int:
+    """Like ack_word, for answering a device FIN with a FIN (seq not advanced)."""
+    c0 = (device_ts & 0xFF) ^ 0x80
+    c1 = (device_ts >> 8) & 0xFF
+    seq = (device_ts >> 16) & 0xFF
+    ack = (device_ts >> 24) & 0xFF
+    return c0 | (c1 << 8) | (ack << 16) | (seq << 24)
+
+
+def encode_ctpp_init(
+    apt_address: str,
+    apt_subaddress: int,
+    timestamp: int | None = None,
+    local_id: int | None = None,
+) -> bytes:
     """Encode the CTPP channel init message (Phase A of door open).
 
     Sent after opening the CTPP channel. The timestamp fills bytes 2-5 and
     must be reused in subsequent ACKs so the device can match them to this
     init (bytes 2-3 act as a "session ID" that must stay consistent).
+
+    The body is a CTP REGISTER (opcode 0x0040) followed by the 16-bit local
+    connection id.  ``local_id=None`` keeps the historic fixed 0x18C2 used by
+    the door/video flows; the VIP registration passes the header's own
+    connection id (``timestamp & 0xFFFF``) so both fields agree.
     """
     addr_with_sub = f"{apt_address}{apt_subaddress}"
     buf = bytearray()
@@ -172,7 +211,7 @@ def encode_ctpp_init(apt_address: str, apt_subaddress: int, timestamp: int | Non
         buf += _CTPP_LEGACY_TS
     buf += _CTPP_INIT_FLAGS1
     buf += _CTPP_INIT_FLAGS2
-    buf += _CTPP_INIT_CAPABILITY
+    buf += struct.pack("<H", local_id & 0xFFFF) if local_id is not None else _CTPP_INIT_CAPABILITY
     buf += _null_terminated(addr_with_sub)
     buf += _CTPP_INIT_SEPARATOR
     buf += _CTPP_INIT_ZERO_PAD

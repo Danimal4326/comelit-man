@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.6.0
+
+### Bug fixes
+
+- **Doorbell rings reach Home Assistant** — on a 6701W (firmware 2.4.3) no ring frame ever arrived on the integration's CTPP channel, while homebridge-comelit-doorbell, using the *same* user slot, received every ring. Three differences in the registration caused it, all fixed:
+  - **Renewal ACKs are derived from the device's frame.** The 4 bytes after the CTPP prefix are the CTP connection id, sequence and ack, not a timestamp. Renewal checks were answered with a fixed `init_ts + 0x01010000`, which only matches the first check after the init; every later one got a stale ACK, the device dropped the registration and rings stopped. Renewals (and the listener's event ACKs) now use `ack_word()`: flip the connection id's top bit, echo the device's ack as our seq, acknowledge its seq + 1
+  - **No blind ACK/FIN after the REGISTER.** The VIP registration no longer sends an `0x1800`/`0x1820` pair right after the init (the FIN read as a hang-up of the registration). It ACKs the device's own `0x1860/0x0010` renewal instead, and a ring arriving mid-registration is handed to the listener instead of being swallowed
+  - **REGISTER carries its own connection id** (`timestamp & 0xFFFF`) instead of the fixed `0x18C2`; door and video flows keep the old value
+- **The empty `0x1860` close from the device is answered with a FIN**, so it stops retransmitting it
+
+### New features
+
+- **Registration lease** — while idle, the REGISTER is re-sent in place every 2 minutes and the connection is rebuilt after 50 minutes (the device expires registrations after about an hour). Both wait while a call or video holds the CTPP channel
+- **Ring events fire immediately** — the `ring` event (doorbell event entity, ringing sensor, counters) now fires as soon as the INVITE arrives instead of after passive video is up (~3+ s later). The last-ring image entity refreshes on a separate internal `ring_snapshot` push once its frame is stored
+
+Thanks to [homebridge-comelit-doorbell](https://github.com/zmanuel1234/homebridge-comelit-doorbell) (Apache-2.0), whose working CTP framing on the same firmware showed the way; this is a Python reimplementation, not a code copy.
+
 ## 1.5.5
 
 ### Bug fixes

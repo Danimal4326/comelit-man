@@ -128,10 +128,10 @@ class TestLastRingImage:
         entity = _make_entity()
         await entity.async_will_remove_from_hass()  # must not raise
 
-    def test_on_push_ring_updates_state(self):
+    def test_on_push_ring_snapshot_updates_state(self):
         entity = _make_entity()
         with patch.object(entity, "async_write_ha_state") as write_state:
-            entity._on_push(PushEvent(event_type="ring", apt_address="SB100001", timestamp=0.0))
+            entity._on_push(PushEvent(event_type="ring_snapshot", apt_address="SB100001", timestamp=0.0))
         write_state.assert_called_once()
         assert entity._attr_image_last_updated is not None
 
@@ -140,4 +140,6 @@ class TestLastRingImage:
         with patch.object(entity, "async_write_ha_state") as write_state:
             entity._on_push(PushEvent(event_type="missed_call", apt_address="SB100001", timestamp=0.0))
             entity._on_push(PushEvent(event_type="door_opened", apt_address="SB100001", timestamp=0.0))
+            # the ring fires before the snapshot exists; only ring_snapshot refreshes
+            entity._on_push(PushEvent(event_type="ring", apt_address="SB100001", timestamp=0.0))
         write_state.assert_not_called()

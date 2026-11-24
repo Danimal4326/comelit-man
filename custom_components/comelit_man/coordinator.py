@@ -26,7 +26,7 @@ from .channels import ChannelType
 from .client import IconaBridgeClient
 from .config_reader import get_device_config
 from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN, GO2RTC_DOMAIN, GO2RTC_FALLBACK_URL
-from .ctpp import _CTR_INCR_BOTH, ctpp_init_sequence
+from .ctpp import _CTR_INCR_BOTH, ctpp_register, ctpp_reregister
 from .door import open_door
 from .exceptions import AuthenticationError, DoorOpenError
 from .models import DeviceConfig, Door, PushEvent
@@ -48,6 +48,12 @@ MISSED_CALL_WINDOW = 45.0
 # How long a viewer waits for a video start that is already in flight.  The
 # device's own UDPM negotiation gives up after ~35 s.
 VIDEO_START_WAIT = 45.0
+# The device's call registration is a lease: re-send REGISTER in place this
+# often while idle, and rebuild the whole connection once it is this old
+# (registrations expire after ~1 h).  Same cadence as homebridge-comelit-doorbell,
+# which keeps rings flowing on the same firmware.
+LEASE_REFRESH_INTERVAL = 120.0
+LEASE_RECYCLE_AFTER = 50 * 60.0
 
 
 def go2rtc_endpoint(hass: HomeAssistant) -> tuple[aiohttp.ClientSession, str]:
@@ -112,6 +118,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # (ack_ts = init_ts + 0x01010000, PCAP-verified).
         self._ctpp_init_ts: int = 0
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._lease_task: asyncio.Task[None] | None = None
+        # Monotonic time the current TCP connection was established (lease recycle).
+        self._connected_mono: float = time.monotonic()
         # Tracks whether we were connected on the last health-check so
         # disconnect / reconnect are logged exactly once per transition.
         self._connection_lost: bool = False
@@ -175,7 +184,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         ctpp = await client.open_channel("CTPP", ChannelType.UAUT, extra_data=our_addr)
         await client.open_channel("CSPB", ChannelType.UAUT)
         ts = int(time.time()) & 0xFFFFFFFF
-        await ctpp_init_sequence(
+        answers = await ctpp_register(
             client,
             ctpp,
             config.apt_address,
@@ -185,9 +194,10 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         )
         self._ctpp_init_ts = ts
         _LOGGER.info(
-            "CTPP channels opened for VIP events (address=%s, ts=0x%08X)",
+            "CTPP channels opened for VIP events (address=%s, ts=0x%08X, answers=%d)",
             our_addr,
             ts,
+            answers,
         )
         return ts
 
@@ -204,6 +214,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise
 
         self._client = client
+        self._connected_mono = time.monotonic()
         client.set_disconnect_callback(self._on_client_disconnect)
 
         # Start VIP event listener for doorbell ring detection, unless disabled.
@@ -286,6 +297,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise
 
         self._client = client
+        self._connected_mono = time.monotonic()
         client.set_disconnect_callback(self._on_client_disconnect)
 
         if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
@@ -582,7 +594,17 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._recent_rings[key] = now
         self._last_ring_mono = now
         self._inbound_answered = False
-        _LOGGER.debug("Inbound ring: entrance=%s ring_ts=0x%08X", entrance_addr, ring_ts)
+        _LOGGER.info("Doorbell ring (entrance=%s ring_ts=0x%08X)", entrance_addr, ring_ts)
+        # Fire the ring at once: notifications must not wait ~3+ s for passive
+        # video.  The camera stream follows; the image entity refreshes on the
+        # later ring_snapshot push.
+        self._on_push_event(
+            PushEvent(
+                event_type="ring",
+                apt_address=entrance_addr,
+                timestamp=time.time(),
+            )
+        )
         self.config_entry.async_create_background_task(
             self.hass,
             self.async_start_inbound_video(entrance_addr, ring_ts),
@@ -713,16 +735,17 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                         snapshot = await asyncio.wait_for(session.rtp_receiver.get_jpeg_frame(), timeout=2.0)
                 if snapshot is not None:
                     self._last_ring_snapshot = snapshot
-            # Fire ring AFTER video is flowing so automations see the stream
+            # The ring event already fired on the INVITE (_on_inbound_ring);
+            # tell the image entity its snapshot is stored.
             self._pending_inbound_ring = entrance_addr
             self._on_push_event(
                 PushEvent(
-                    event_type="ring",
+                    event_type="ring_snapshot",
                     apt_address=entrance_addr,
                     timestamp=time.time(),
                 )
             )
-            _LOGGER.info("Inbound video ready, ring fired (entrance=%s)", entrance_addr)
+            _LOGGER.info("Inbound video ready (entrance=%s)", entrance_addr)
 
     async def async_answer_inbound(self) -> None:
         """Answer an active passive inbound call — send answer signals, start audio."""
@@ -795,15 +818,70 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._video_stopped_by_user = True
 
     def _start_keepalive(self) -> None:
-        """Start the background keepalive task (cancels any previous one)."""
+        """Start the keepalive and registration-lease tasks (cancels previous ones)."""
         self._cancel_keepalive()
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+            self._lease_task = asyncio.create_task(self._lease_loop())
 
     def _cancel_keepalive(self) -> None:
-        """Cancel the keepalive task if running."""
+        """Cancel the keepalive and lease tasks if running."""
         if self._keepalive_task and not self._keepalive_task.done():
             self._keepalive_task.cancel()
         self._keepalive_task = None
+        if self._lease_task and not self._lease_task.done():
+            self._lease_task.cancel()
+        self._lease_task = None
+
+    def _lease_idle(self) -> bool:
+        """True when only the VIP listener uses the CTPP channel (no call/video)."""
+        return self._vip_listener is not None and self._video_session is None and not self._video_start_lock.locked()
+
+    async def _lease_loop(self) -> None:
+        """Keep the device's call registration alive while idle.
+
+        Every LEASE_REFRESH_INTERVAL the REGISTER is re-sent in place on the
+        shared CTPP channel (the running listener ACKs the device's answers).
+        Once the connection is LEASE_RECYCLE_AFTER old, it is rebuilt from
+        scratch in a separate task.  Both wait while a call or video holds the
+        CTPP channel -- those re-register on their own.
+        """
+        while True:
+            await asyncio.sleep(LEASE_REFRESH_INTERVAL)
+            client = self._client
+            config = self._config
+            if client is None or not client.connected or config is None:
+                return
+            if not self._lease_idle():
+                continue
+            if time.monotonic() - self._connected_mono >= LEASE_RECYCLE_AFTER:
+                _LOGGER.debug("Registration lease: recycling the connection")
+                self.config_entry.async_create_background_task(
+                    self.hass, self._recycle_connection(), "comelit-lease-recycle"
+                )
+                return
+            ctpp = client.get_channel("CTPP")
+            if ctpp is None:
+                continue
+            ts = int(time.time()) & 0xFFFFFFFF
+            try:
+                await ctpp_reregister(client, ctpp, config.apt_address, config.apt_subaddress, ts)
+                self._ctpp_init_ts = ts
+                _LOGGER.debug("Registration lease refreshed (ts=0x%08X)", ts)
+            except Exception:
+                _LOGGER.debug("Registration lease refresh failed", exc_info=True)
+
+    async def _recycle_connection(self) -> None:
+        """Rebuild the connection for a fresh registration, unless a call is active."""
+        async with self._video_start_lock:
+            if self._video_session is not None or self._client is None:
+                # A call/video started meanwhile; try again on the next lease.
+                self._start_keepalive()
+                return
+            try:
+                await self._reconnect()
+            except Exception:
+                _LOGGER.warning("Registration lease recycle failed -- health check will retry", exc_info=True)
 
     async def _keepalive_loop(self) -> None:
         """Send a periodic push-info probe to keep the TCP connection alive.

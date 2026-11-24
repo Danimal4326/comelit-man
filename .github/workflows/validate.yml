@@ -87,6 +87,7 @@ jobs:
             tests/test_channels.py \
             tests/test_coverage_extras.py \
             tests/test_door_flow.py \
+            tests/test_ring_registration.py \
             --cov=custom_components/comelit_man \
             --cov-report=term-missing \
             --cov-report=xml \

@@ -72,6 +72,8 @@ def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     coordinator._on_stop_video = {}
     coordinator._on_video_state_change = {}
     coordinator._keepalive_task = None
+    coordinator._lease_task = None
+    coordinator._connected_mono = 0.0
     coordinator._connection_lost = False
     coordinator._ctpp_init_ts = 0
     coordinator._last_ring_snapshot = None
@@ -511,7 +513,7 @@ class TestOpenCtppChannels:
         config = _make_config()
 
         with patch(
-            "custom_components.comelit_man.coordinator.ctpp_init_sequence",
+            "custom_components.comelit_man.coordinator.ctpp_register",
             new_callable=AsyncMock,
         ):
             ts = await coord._open_ctpp_channels(coord._client, config)
@@ -1571,7 +1573,8 @@ class TestOnRingDuringVideo:
         coord, events = self._coord_with_events()
         coord._on_inbound_ring("SB100001", 0x27EEAB1C)
         coord._on_ring_during_video("SB100001", 0x27EEAB1C)
-        assert events == []  # inbound path fires its event later, after video is ready
+        # The inbound path fired its ring on the INVITE; mid-call retransmit doesn't refire.
+        assert [e.event_type for e in events] == ["ring"]
 
     def test_records_ring_recency_and_clears_answered(self):
         coord, events = self._coord_with_events()
@@ -1777,8 +1780,8 @@ class TestAsyncStartInboundVideo:
         assert coord._video_session is session
         assert coord._video_ready_event.is_set()
         coord._rtsp_server.mark_ready.assert_called_once()
-        # ring fires only after video is flowing
-        assert [e.event_type for e in events] == ["ring"]
+        # the ring itself fired on the INVITE; video readiness only refreshes the snapshot
+        assert [e.event_type for e in events] == ["ring_snapshot"]
         assert coord._pending_inbound_ring == "SB100001"
 
     @pytest.mark.asyncio
@@ -1812,7 +1815,7 @@ class TestAsyncStartInboundVideo:
             await coord.async_start_inbound_video("SB100001", 0x1234)
 
         assert coord.last_ring_snapshot is None
-        assert [e.event_type for e in events] == ["ring"]
+        assert [e.event_type for e in events] == ["ring_snapshot"]
 
     @pytest.mark.asyncio
     async def test_backchannel_queue_attached(self):
@@ -1901,7 +1904,7 @@ class TestAsyncStartInboundVideo:
             await coord.async_start_inbound_video("SB100001", 0x1234)
 
         assert coord._video_session is session
-        assert [e.event_type for e in events] == ["ring"]
+        assert [e.event_type for e in events] == ["ring_snapshot"]
 
 
 class TestCoordinatorRemainingPaths:
