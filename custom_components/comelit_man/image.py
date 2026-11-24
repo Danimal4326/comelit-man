@@ -71,7 +71,12 @@ class LastRingImage(ComelitEntity, ImageEntity):
             self._remove_push_cb = None
 
     def _on_push(self, event: PushEvent) -> None:
-        """Refresh state when a ring event fires (snapshot is already stored)."""
-        if event.event_type == "ring":
+        """Refresh state once the ring's snapshot has been stored.
+
+        The ring event itself now fires as soon as the INVITE arrives, before
+        passive video (and so the snapshot) exists; the coordinator sends a
+        separate ``ring_snapshot`` push once the frame is stored.
+        """
+        if event.event_type == "ring_snapshot":
             self._attr_image_last_updated = datetime.now(UTC)
             self.async_write_ha_state()

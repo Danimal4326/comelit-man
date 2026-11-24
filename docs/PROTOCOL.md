@@ -336,6 +336,17 @@ Every ~2 minutes the device sends `0x1860` / action `0x0010`. The client must
 answer with a **pair**: `0x1800` then `0x1820`. Miss it and the device stops
 delivering VIP events entirely — rings simply stop arriving, with no error.
 
+> **v1.6.0 correction (6701W fw 2.4.3).** The 4 bytes after the prefix are the
+> CTP header `[conn0, conn1, seq, ack]`, and the "action" is the body length
+> (`0x0010` = 16-byte renewal body, `0x0000` = empty close). The renewal ACK
+> word must be derived from **each renewal frame** with `ack_word()` (§5): the
+> old fixed `init_ts + 0x01010000` only matched the first renewal after the
+> init, after which the device dropped the registration and no ring ever
+> arrived. The VIP registration also must **not** send a blind ACK/FIN pair
+> right after the REGISTER, and its REGISTER body carries the header's own
+> connection id. The registration is a lease: re-REGISTER every 2 min while
+> idle and rebuild the connection after 50 min (`coordinator._lease_loop`).
+
 **The renewal's addresses must be read from the message, not from config.**
 The device embeds its own binary VIP address, which can differ from the
 `apt-address` returned by the JSON configuration API (observed: binary
@@ -376,14 +387,19 @@ Used for every `0x1800` ACK of a `0x18C0` / `0x1840` / `0x1860` event
 (`video_call.py:_transform_device_ts`). Caller is `apt_addr+sub`, callee is the
 bare `apt_addr`.
 
-**2. Registration renewal ACKs — derive from our own init.**
+**2. Registration renewal ACKs — derive from the renewal frame (v1.6.0).**
 
-```
-ack_ts = (ctpp_init_ts + 0x01010000) & 0xFFFFFFFF
+```python
+c0, c1, seq, ack = struct.pack("<I", device_ts)
+ack_ts = struct.unpack("<I", bytes([c0 ^ 0x80, c1, ack, (seq + 1) & 0xFF]))[0]
 ```
 
-Constant across the life of the channel. Never derived from the device's
-renewal timestamp.
+`protocol.ack_word()`; `fin_word()` is the same without advancing `seq`, for
+answering a device FIN. The VIP listener uses it for renewals and events. For
+device-opened connections (top bit clear) it equals the event transform above.
+Before v1.6.0 renewals were answered with the constant
+`(ctpp_init_ts + 0x01010000)`, which is only right for the first renewal —
+the video/inbound flows still use it mid-call.
 
 **3. Call counters — increment specific bytes.**
 

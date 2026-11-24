@@ -396,12 +396,12 @@ class TestProcessMessage:
         assert cb.call_args[0][0].event_type == "ring"
 
     @pytest.mark.asyncio
-    async def test_renewal_ack_uses_init_ts_plus_ctr_incr(self):
-        """Renewal ACK timestamp must be init_ts + 0x01010000 — PCAP-verified.
+    async def test_renewal_ack_uses_ack_word_of_device_ts(self):
+        """Renewal ACK word is ack_word(device renewal ts), not init_ts + 0x01010000.
 
-        The client derives outgoing ACK timestamps from its OWN init_ts, not
-        from the device's renewal timestamp. Using the device ts causes the
-        device to reject the ACK and retransmit until it gives up.
+        The fixed init_ts offset only matched the first renewal after the init;
+        later renewals advance the device's seq/ack, the stale ACK was rejected
+        and the device stopped delivering rings.
         """
         cb = MagicMock()
         init_ts = 0x12000000
@@ -419,11 +419,14 @@ class TestProcessMessage:
         listener._client.send_binary = AsyncMock(side_effect=capture_send)
         await listener._process_message(data)
 
+        from custom_components.comelit_man.protocol import ack_word
+
         assert len(sent_payloads) == 2
-        expected_ts = (init_ts + 0x01010000) & 0xFFFFFFFF
+        expected_ts = ack_word(device_ts)
         for payload in sent_payloads:
             actual_ts = struct.unpack_from("<I", payload, 2)[0]
             assert actual_ts == expected_ts
+            assert actual_ts != (init_ts + 0x01010000) & 0xFFFFFFFF
 
     @pytest.mark.asyncio
     async def test_renewal_ack_addresses_extracted_from_renewal_message(self):
@@ -756,9 +759,14 @@ class TestSendEventAckPayload:
         assert callee != entrance_addr
 
     @pytest.mark.asyncio
-    async def test_vip_event_ack_timestamp_is_transform_of_device_ts(self):
-        """ACTION_IN_ALERTING ACK timestamp == transform(device_ts), not init_ts+ctr."""
-        from custom_components.comelit_man.video_call import _transform_device_ts
+    async def test_vip_event_ack_timestamp_is_ack_word_of_device_ts(self):
+        """ACTION_IN_ALERTING ACK == ack_word(device_ts), not init_ts+ctr.
+
+        0xDEADBEEF has the connection id's top bit set (a frame on a connection
+        we opened): ack_word flips it back (XOR), where the old transform kept it
+        set (OR).  For device-opened connections the two are identical.
+        """
+        from custom_components.comelit_man.protocol import ack_word as _transform_device_ts
 
         init_ts = 0x12000000
         device_ts = 0xDEADBEEF
