@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.7.0
+
+### Bug fixes
+
+- **Answering a ring is accepted by the panel** — the answer sent VOICESTATUS with our own address followed by a 2-byte `000c`; a 6701W (fw 2.4.3) never accepted it (no audio channel, the in-call door open ignored). It now sends the 8-byte SETUP_ACK `000c000000000000` on the ring's connection with the panel's current ack, byte-identical to what homebridge-comelit-doorbell sends there (captured 2026-11-24: the panel then sends its media request and VOICESTATUS, other receivers get RELEASE cause 10, and the in-call open trips the gate). The capabilities on a ring use `0x27`, as the Comelit app and that plugin send
+- **A ring answered elsewhere is not a missed call** — the panel's RELEASE with cause 10 (another receiver answered) now ends Home Assistant's passive session without firing `missed_call`
+- **Answer presses are serialised**, and a call only counts as answered once the panel acknowledged the answer
+
+### New features
+
+- **Unlock during a ring** — opening a door while a ring is unanswered waits for the ring's video (up to 10 s), answers, opens inside the call and hangs up 5 s later unless the camera is being watched. The panel only releases a door during a ring for the receiver that answered it. In-call opens on an incoming call name our apartment as callee (official-app capture via cuchipandy/comelit-cuchicodex)
+- **Talk-back in Home Assistant's camera dialog** — on HA 2026.11+ the intercom camera declares two-way audio, so the built-in dialog offers a microphone over WebRTC (Labs "two-way audio" preview)
+- **Two config entries at once** — the local RTSP server falls back to a free port when 8557 is taken (e.g. monitor + door station entries)
+
 ## 1.6.0
 
 ### Bug fixes

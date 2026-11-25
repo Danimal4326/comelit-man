@@ -73,6 +73,7 @@ def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     coordinator._on_video_state_change = {}
     coordinator._keepalive_task = None
     coordinator._lease_task = None
+    coordinator._answer_lock = asyncio.Lock()
     coordinator._connected_mono = 0.0
     coordinator._connection_lost = False
     coordinator._ctpp_init_ts = 0

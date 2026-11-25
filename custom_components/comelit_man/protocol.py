@@ -524,6 +524,27 @@ def encode_rtpc2_ready(caller: str, callee: str, timestamp: int) -> bytes:
     )
 
 
+def encode_setup_ack(caller: str, callee: str, timestamp: int) -> bytes:
+    """Encode the answer to an incoming call: CTP SETUP_ACK ``000c000000000000``.
+
+    Byte-identical to what homebridge-comelit-doorbell (and the Comelit app's
+    flow it mirrors) sends on the ring's connection, which a 6701W (fw 2.4.3)
+    accepts — captured 2026-11-24: after it the panel sends its audio media
+    request and VOICESTATUS, other receivers get RELEASE cause 10, and an
+    in-call OPEN_DOOR then trips the gate.  The older 2-byte ``000c``
+    (encode_call_accepted) preceded by VOICESTATUS was never accepted there.
+    """
+    return _build_ctpp_video_msg(
+        prefix=0x1840,
+        timestamp=timestamp,
+        action=0x0008,  # body length
+        flags=0x000C,  # opcode SETUP_ACK
+        caller=caller,
+        callee=callee,
+        extra=b"\x00" * 6,
+    )
+
+
 def encode_call_accepted(caller: str, callee: str, timestamp: int) -> bytes:
     """Encode call-accepted message sent TO the device on inbound answer.
 

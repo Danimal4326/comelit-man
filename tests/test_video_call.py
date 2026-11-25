@@ -1870,8 +1870,8 @@ class TestAnswerInbound:
         return session, mock_client, mock_receiver, ctpp_ch, inbound_device_rtpc
 
     @pytest.mark.asyncio
-    async def test_answer_inbound_sends_peer_call_accepted_transform_acks_starts_audio(self):
-        """answer_inbound sends peer+call_accepted, drains 0x000A/0x000E with
+    async def test_answer_inbound_sends_setup_ack_transform_acks_starts_audio(self):
+        """answer_inbound sends SETUP_ACK, drains 0x000A/0x000E with
         transform(device_ts) ACKs, waits for device RTPC, starts audio."""
         import struct
 
@@ -1895,19 +1895,16 @@ class TestAnswerInbound:
             await session._answer_handoff.put(peer_msg)
 
         inject_task = asyncio.create_task(run_and_inject())
-        await session.answer_inbound()
+        assert await session.answer_inbound() is True
         await inject_task
 
         calls = mock_client.send_binary.call_args_list
         sent_payloads = [c.args[1] for c in calls]
 
-        # Peer + call_accepted must be the first two sends
-        from custom_components.comelit_man.protocol import encode_answer_peer, encode_call_accepted
+        # SETUP_ACK is the first send (seq + 1; no peer ack tracked yet)
+        from custom_components.comelit_man.protocol import encode_setup_ack
 
-        counter_after_peer = (0x00100000 + 0x00010000) & 0xFFFFFFFF
-        counter_after_accepted = (counter_after_peer + 0x00010000) & 0xFFFFFFFF
-        assert encode_answer_peer(our_addr, our_base, counter_after_peer, inbound=True) in sent_payloads
-        assert encode_call_accepted(our_addr, our_base, counter_after_accepted) in sent_payloads
+        assert sent_payloads[0] == encode_setup_ack(our_addr, our_base, 0x00110000)
 
         # Transform-based ACKs for 0x000A and 0x000E
         from custom_components.comelit_man.protocol import encode_call_response_ack
@@ -2013,8 +2010,8 @@ class TestAnswerInbound:
             await session.answer_inbound()
 
         assert session._answer_handoff is None
-        # peer + call_accepted only — no transform ACK, since nothing was drained
-        assert mock_client.send_binary.await_count == 2
+        # SETUP_ACK only — no transform ACK, since nothing was drained
+        assert mock_client.send_binary.await_count == 1
 
     @pytest.mark.asyncio
     async def test_tcp_send_closure_targets_the_device_rtpc_channel(self):

@@ -124,6 +124,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._ctpp_init_ts: int = 0
         self._keepalive_task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
+        # Serialises answers: a second press while one is in flight waits for it.
+        self._answer_lock: asyncio.Lock = asyncio.Lock()
         # Monotonic time the current TCP connection was established (lease recycle).
         self._connected_mono: float = time.monotonic()
         # Tracks whether we were connected on the last health-check so
@@ -411,8 +413,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             answered_for_door = False
             if self._pending_inbound_ring is not None and not self._inbound_answered:
                 _LOGGER.info("Door open during an unanswered ring — answering first")
-                await self.async_answer_inbound()
-                answered_for_door = self._inbound_answered
+                answered_for_door = await self.async_answer_inbound(wait_audio=False)
             our_addr = f"{self._config.apt_address}{self._config.apt_subaddress}"
             entrance_addr = self._config.caller_address or our_addr
             await self._video_session.async_open_door_on_ctpp(our_addr, entrance_addr, door.output_index)
@@ -720,6 +721,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 on_call_end=self._on_video_call_end,
                 on_timeout=self._on_video_call_end,
                 on_ring=self._on_ring_during_video,
+                on_release=self._on_inbound_released,
             )
             try:
                 renewal_ack_ts = (self._ctpp_init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
@@ -780,12 +782,31 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self.request_video_stop()
         await self.async_stop_video()
 
-    async def async_answer_inbound(self) -> None:
-        """Answer an active passive inbound call — send answer signals, start audio."""
-        if self._video_session and self._video_session.active:
-            await self._video_session.answer_inbound()
-            self._inbound_answered = True
+    async def async_answer_inbound(self, wait_audio: bool = True) -> bool:
+        """Answer an active passive inbound call; return True if the device accepted it."""
+        async with self._answer_lock:
+            if self._inbound_answered:
+                return True
+            if not (self._video_session and self._video_session.active):
+                return False
+            accepted = await self._video_session.answer_inbound(wait_audio=wait_audio)
+            if accepted:
+                self._inbound_answered = True
+                self._pending_inbound_ring = None
+            return accepted
+
+    def _on_inbound_released(self, cause: int) -> None:
+        """The device ended the ring's call (RELEASE): stop the passive session.
+
+        Cause 10 means another receiver (wall monitor, phone, Homebridge)
+        answered: that is not a missed call.
+        """
+        if cause == 10 and not self._inbound_answered:
+            _LOGGER.info("Ring answered by another receiver")
             self._pending_inbound_ring = None
+            self._last_ring_mono = None
+        self.request_video_stop()
+        self.config_entry.async_create_background_task(self.hass, self.async_stop_video(), "comelit-inbound-released")
 
     async def _register_go2rtc_stream(self) -> None:
         """Register our RTSP stream with go2rtc, enabling backchannel support.
