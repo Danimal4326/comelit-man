@@ -524,6 +524,27 @@ def encode_rtpc2_ready(caller: str, callee: str, timestamp: int) -> bytes:
     )
 
 
+def encode_setup_ack(caller: str, callee: str, timestamp: int) -> bytes:
+    """Encode the answer to an incoming call: CTP SETUP_ACK ``000c000000000000``.
+
+    Byte-identical to what homebridge-comelit-doorbell (and the Comelit app's
+    flow it mirrors) sends on the ring's connection, which a 6701W (fw 2.4.3)
+    accepts — captured 2026-11-24: after it the panel sends its audio media
+    request and VOICESTATUS, other receivers get RELEASE cause 10, and an
+    in-call OPEN_DOOR then trips the gate.  The older 2-byte ``000c``
+    (encode_call_accepted) preceded by VOICESTATUS was never accepted there.
+    """
+    return _build_ctpp_video_msg(
+        prefix=0x1840,
+        timestamp=timestamp,
+        action=0x0008,  # body length
+        flags=0x000C,  # opcode SETUP_ACK
+        caller=caller,
+        callee=callee,
+        extra=b"\x00" * 6,
+    )
+
+
 def encode_call_accepted(caller: str, callee: str, timestamp: int) -> bytes:
     """Encode call-accepted message sent TO the device on inbound answer.
 
@@ -548,6 +569,8 @@ def encode_door_open_during_video(
     entrance_addr: str,
     call_counter: int,
     relay_index: int,
+    *,
+    callee: str | None = None,
 ) -> bytes:
     """Encode a door open command for use on an active video CTPP channel.
 
@@ -558,7 +581,12 @@ def encode_door_open_during_video(
     Body structure (48 bytes):
       [LE16 0x1840] [LE32 counter] [BE16 0x000D] [BE16 0x002D]
       [entrance_addr padded to 10] [LE32 relay_index] [4x 0xFF]
-      [our_addr padded to 10] [entrance_addr padded to 10]
+      [our_addr padded to 10] [callee padded to 10]
+
+    The callee is the entrance for a call we started (manual viewing), but our
+    apartment base address during an incoming call — per an official-app
+    capture of an in-call open on an answered ring (cuchipandy/comelit-cuchicodex,
+    Apache-2.0).
 
     relay_index: the door's output_index from the device config (PCAP shows 1
     for the only door on that device; use door.output_index for our device).
@@ -574,7 +602,7 @@ def encode_door_open_during_video(
     buf += struct.pack("<I", relay_index)
     buf += b"\xff\xff\xff\xff"
     buf += our_b
-    buf += entr_b
+    buf += callee.encode("ascii").ljust(10, b"\x00")[:10] if callee is not None else entr_b
     return bytes(buf)
 
 

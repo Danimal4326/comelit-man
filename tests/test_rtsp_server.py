@@ -2413,3 +2413,34 @@ class TestClientCount:
         assert server.client_count == 0
         server._active_clients.append(_TcpClient(writer=MagicMock()))
         assert server.client_count == 1
+
+
+@pytest.mark.usefixtures("socket_enabled")
+class TestPortFallback:
+    @pytest.mark.asyncio
+    async def test_second_server_on_same_port_falls_back_to_free_port(self):
+        """Two entries no longer collide on the default RTSP port (Errno 98)."""
+        first = LocalRtspServer(port=0)
+        await first.start()
+        taken = first._rtsp_port
+        second = LocalRtspServer(port=taken)
+        try:
+            await second.start()
+            assert second._rtsp_port not in (0, taken)
+            assert second.rtsp_url != first.rtsp_url
+        finally:
+            await second.stop()
+            await first.stop()
+
+    @pytest.mark.asyncio
+    async def test_other_bind_errors_still_raise(self):
+        server = LocalRtspServer(port=8557)
+        err = OSError(13, "Permission denied")
+        with (
+            patch("asyncio.start_server", side_effect=err),
+            pytest.raises(OSError, match="Permission denied"),
+        ):
+            await server.start()
+        for sock in (server._video_sock, server._audio_sock):
+            if sock is not None:
+                sock.close()

@@ -73,6 +73,7 @@ def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     coordinator._on_video_state_change = {}
     coordinator._keepalive_task = None
     coordinator._lease_task = None
+    coordinator._answer_lock = asyncio.Lock()
     coordinator._connected_mono = 0.0
     coordinator._connection_lost = False
     coordinator._ctpp_init_ts = 0
@@ -892,11 +893,13 @@ class TestStartVideoExtended:
 
 
 class TestVideoCallEnd:
-    def test_on_video_call_end_skips_when_user_stopped(self):
+    def test_on_video_call_end_clears_instead_of_restarting_when_user_stopped(self):
+        """A stopped session that ends on its own is cleared, never restarted."""
         coord = _make_coordinator()
         coord._video_stopped_by_user = True
         coord._on_video_call_end()
-        coord.config_entry.async_create_background_task.assert_not_called()
+        coord.config_entry.async_create_background_task.assert_called_once()
+        assert coord.config_entry.async_create_background_task.call_args.args[2] == "comelit-clear-ended-video"
 
     def test_on_video_call_end_schedules_restart_when_not_user_stopped(self):
         coord = _make_coordinator()

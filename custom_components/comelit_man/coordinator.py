@@ -54,6 +54,11 @@ VIDEO_START_WAIT = 45.0
 # which keeps rings flowing on the same firmware.
 LEASE_REFRESH_INTERVAL = 120.0
 LEASE_RECYCLE_AFTER = 50 * 60.0
+# The panel only releases a door during a ring for the receiver that answered
+# it.  A door open during an unanswered ring answers first, opens in-call, and
+# hangs up this long after (unless someone is watching the camera).
+DOOR_RING_VIDEO_WAIT = 10.0
+DOOR_ANSWER_HANGUP_DELAY = 5.0
 
 
 def go2rtc_endpoint(hass: HomeAssistant) -> tuple[aiohttp.ClientSession, str]:
@@ -119,6 +124,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._ctpp_init_ts: int = 0
         self._keepalive_task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
+        # Serialises answers: a second press while one is in flight waits for it.
+        self._answer_lock: asyncio.Lock = asyncio.Lock()
         # Monotonic time the current TCP connection was established (lease recycle).
         self._connected_mono: float = time.monotonic()
         # Tracks whether we were connected on the last health-check so
@@ -396,10 +403,24 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         if not self._config or not self._client:
             raise RuntimeError("Not connected")
+        # A ring's passive video may still be starting: wait for it, since the
+        # panel ignores a plain open while it rings.
+        if self._video_session is None and self._ring_recent() and self._video_start_lock.locked():
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(DOOR_RING_VIDEO_WAIT):
+                    await self._video_ready_event.wait()
         if self._video_session and self._video_session.active:
+            answered_for_door = False
+            if self._pending_inbound_ring is not None and not self._inbound_answered:
+                _LOGGER.info("Door open during an unanswered ring — answering first")
+                answered_for_door = await self.async_answer_inbound(wait_audio=False)
             our_addr = f"{self._config.apt_address}{self._config.apt_subaddress}"
             entrance_addr = self._config.caller_address or our_addr
             await self._video_session.async_open_door_on_ctpp(our_addr, entrance_addr, door.output_index)
+            if answered_for_door:
+                self.config_entry.async_create_background_task(
+                    self.hass, self._hangup_after_door_open(), "comelit-door-hangup"
+                )
         else:
             try:
                 await open_door(self.host, self.port, self.token, self._client, self._config, door)
@@ -541,6 +562,11 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     def _on_video_call_end(self) -> None:
         """Called by VideoCallSession when the device sends CALL_END."""
         if self._video_stopped_by_user:
+            # The session ended on its own after a stop was requested: clear
+            # it, or it lingers and keeps the VIP listener from coming back.
+            self.config_entry.async_create_background_task(
+                self.hass, self.async_stop_video(), "comelit-clear-ended-video"
+            )
             return
         _LOGGER.debug("CALL_END received — scheduling session restart")
         self.config_entry.async_create_background_task(
@@ -700,6 +726,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 on_call_end=self._on_video_call_end,
                 on_timeout=self._on_video_call_end,
                 on_ring=self._on_ring_during_video,
+                on_release=self._on_inbound_released,
             )
             try:
                 renewal_ack_ts = (self._ctpp_init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
@@ -747,12 +774,60 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             )
             _LOGGER.info("Inbound video ready (entrance=%s)", entrance_addr)
 
-    async def async_answer_inbound(self) -> None:
-        """Answer an active passive inbound call — send answer signals, start audio."""
-        if self._video_session and self._video_session.active:
-            await self._video_session.answer_inbound()
-            self._inbound_answered = True
+    def _ring_recent(self) -> bool:
+        """True when a ring arrived within the missed-call window."""
+        return self._last_ring_mono is not None and time.monotonic() - self._last_ring_mono <= MISSED_CALL_WINDOW
+
+    async def _hangup_after_door_open(self) -> None:
+        """Hang up a call answered only to open the door, unless someone is watching."""
+        await asyncio.sleep(DOOR_ANSWER_HANGUP_DELAY)
+        if self._rtsp_server is not None and self._rtsp_server.client_count > 0:
+            _LOGGER.debug("Door opened in an answered ring; camera is watched — keeping the call")
+            return
+        self.request_video_stop()
+        await self.async_stop_video()
+
+    async def async_answer_inbound(self, wait_audio: bool = True) -> bool:
+        """Answer an active passive inbound call; return True if the device accepted it."""
+        async with self._answer_lock:
+            if self._inbound_answered:
+                return True
+            if not (self._video_session and self._video_session.active):
+                return False
+            accepted = await self._video_session.answer_inbound(wait_audio=wait_audio)
+            if accepted:
+                self._inbound_answered = True
+                self._pending_inbound_ring = None
+            return accepted
+
+    def _on_inbound_released(self, cause: int) -> None:
+        """The device ended the ring's call (RELEASE): stop the passive session.
+
+        Cause 10 means another receiver (wall monitor, phone, Homebridge)
+        answered: that is not a missed call.
+        """
+        if cause == 10 and not self._inbound_answered:
+            _LOGGER.info("Ring answered by another receiver")
             self._pending_inbound_ring = None
+            self._last_ring_mono = None
+        self.request_video_stop()
+        self.config_entry.async_create_background_task(
+            self.hass, self._stop_after_release(), "comelit-inbound-released"
+        )
+
+    async def _stop_after_release(self) -> None:
+        """Stop the released ring's session once it has finished starting.
+
+        The RELEASE can arrive while async_start_inbound_video still holds the
+        start lock and has not published the session yet (e.g. a HomeKit view
+        answered within seconds); stopping then would find nothing and leave
+        the session behind.  Wait for the start to finish, then stop, and make
+        sure the VIP listener is back.
+        """
+        async with self._video_start_lock:
+            pass
+        await self.async_stop_video()
+        await self._ensure_vip_listener()
 
     async def _register_go2rtc_stream(self) -> None:
         """Register our RTSP stream with go2rtc, enabling backchannel support.
@@ -1022,9 +1097,34 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             self.hass, self.async_request_refresh(), "comelit-reconnect-refresh"
         )
 
+    async def _repair_vip_listener(self) -> None:
+        """Bring the VIP listener back if it is missing while no call holds CTPP.
+
+        Without the listener there are no rings, and the lease loop pauses too
+        (it waits for an idle listener), so nothing else would restore it.
+        """
+        if not self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+            return
+        if self._vip_listener is not None or self._video_start_lock.locked() or not self._client or not self._config:
+            return
+        session = self._video_session
+        if session is not None and session.active:
+            return
+        _LOGGER.warning("VIP listener was not running — restoring it")
+        if session is not None:
+            await self.async_stop_video()  # clears the ended session, restarts the listener
+        await self._ensure_vip_listener()
+        ctpp = self._client.get_channel("CTPP") if self._client else None
+        if self._vip_listener is not None and ctpp is not None:
+            ts = int(time.time()) & 0xFFFFFFFF
+            with contextlib.suppress(Exception):
+                await ctpp_reregister(self._client, ctpp, self._config.apt_address, self._config.apt_subaddress, ts)
+                self._ctpp_init_ts = ts
+
     async def _async_update_data(self) -> DeviceConfig:
         """Health-check the connection; reconnect if needed."""
         if self._client and self._client.connected and self._config:
+            await self._repair_vip_listener()
             return self._config
 
         # Connection lost or no config — attempt reconnect.
