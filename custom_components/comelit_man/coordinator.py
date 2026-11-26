@@ -562,6 +562,11 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     def _on_video_call_end(self) -> None:
         """Called by VideoCallSession when the device sends CALL_END."""
         if self._video_stopped_by_user:
+            # The session ended on its own after a stop was requested: clear
+            # it, or it lingers and keeps the VIP listener from coming back.
+            self.config_entry.async_create_background_task(
+                self.hass, self.async_stop_video(), "comelit-clear-ended-video"
+            )
             return
         _LOGGER.debug("CALL_END received — scheduling session restart")
         self.config_entry.async_create_background_task(
@@ -806,7 +811,23 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             self._pending_inbound_ring = None
             self._last_ring_mono = None
         self.request_video_stop()
-        self.config_entry.async_create_background_task(self.hass, self.async_stop_video(), "comelit-inbound-released")
+        self.config_entry.async_create_background_task(
+            self.hass, self._stop_after_release(), "comelit-inbound-released"
+        )
+
+    async def _stop_after_release(self) -> None:
+        """Stop the released ring's session once it has finished starting.
+
+        The RELEASE can arrive while async_start_inbound_video still holds the
+        start lock and has not published the session yet (e.g. a HomeKit view
+        answered within seconds); stopping then would find nothing and leave
+        the session behind.  Wait for the start to finish, then stop, and make
+        sure the VIP listener is back.
+        """
+        async with self._video_start_lock:
+            pass
+        await self.async_stop_video()
+        await self._ensure_vip_listener()
 
     async def _register_go2rtc_stream(self) -> None:
         """Register our RTSP stream with go2rtc, enabling backchannel support.
@@ -1076,9 +1097,34 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             self.hass, self.async_request_refresh(), "comelit-reconnect-refresh"
         )
 
+    async def _repair_vip_listener(self) -> None:
+        """Bring the VIP listener back if it is missing while no call holds CTPP.
+
+        Without the listener there are no rings, and the lease loop pauses too
+        (it waits for an idle listener), so nothing else would restore it.
+        """
+        if not self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+            return
+        if self._vip_listener is not None or self._video_start_lock.locked() or not self._client or not self._config:
+            return
+        session = self._video_session
+        if session is not None and session.active:
+            return
+        _LOGGER.warning("VIP listener was not running — restoring it")
+        if session is not None:
+            await self.async_stop_video()  # clears the ended session, restarts the listener
+        await self._ensure_vip_listener()
+        ctpp = self._client.get_channel("CTPP") if self._client else None
+        if self._vip_listener is not None and ctpp is not None:
+            ts = int(time.time()) & 0xFFFFFFFF
+            with contextlib.suppress(Exception):
+                await ctpp_reregister(self._client, ctpp, self._config.apt_address, self._config.apt_subaddress, ts)
+                self._ctpp_init_ts = ts
+
     async def _async_update_data(self) -> DeviceConfig:
         """Health-check the connection; reconnect if needed."""
         if self._client and self._client.connected and self._config:
+            await self._repair_vip_listener()
             return self._config
 
         # Connection lost or no config — attempt reconnect.

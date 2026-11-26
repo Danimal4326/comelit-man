@@ -340,3 +340,91 @@ class TestLeaseLoop:
         with patch.object(coord, "_reconnect", new_callable=AsyncMock, side_effect=RuntimeError("down")):
             await coord._recycle_connection()
         assert "lease recycle failed" in caplog.text
+
+
+class TestListenerRepair:
+    """The 2026-11-25 failure: a ring answered by Homebridge within seconds left the
+    released session behind, the VIP listener never came back and rings stopped."""
+
+    @pytest.mark.asyncio
+    async def test_missing_listener_is_restored_and_reregistered(self):
+        coord = _coordinator()
+        coord._config = MagicMock(apt_address=APT, apt_subaddress=SUB)
+        coord._client.get_channel = MagicMock(return_value=MagicMock())
+
+        async def _ensure():
+            coord._vip_listener = MagicMock()
+
+        with (
+            patch.object(coord, "_ensure_vip_listener", side_effect=_ensure) as ensure,
+            patch.object(coord_mod, "ctpp_reregister", new_callable=AsyncMock) as rereg,
+        ):
+            await coord._repair_vip_listener()
+        ensure.assert_awaited_once()
+        rereg.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ended_session_is_cleared_first(self):
+        coord = _coordinator()
+        coord._video_session = MagicMock(active=False)
+        with (
+            patch.object(coord, "async_stop_video", new_callable=AsyncMock) as stop,
+            patch.object(coord, "_ensure_vip_listener", new_callable=AsyncMock),
+            patch.object(coord_mod, "ctpp_reregister", new_callable=AsyncMock),
+        ):
+            await coord._repair_vip_listener()
+        stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_repair_during_an_active_call_or_start(self):
+        coord = _coordinator()
+        coord._video_session = MagicMock(active=True)
+        with patch.object(coord, "_ensure_vip_listener", new_callable=AsyncMock) as ensure:
+            await coord._repair_vip_listener()
+            coord._video_session = None
+            await coord._video_start_lock.acquire()
+            try:
+                await coord._repair_vip_listener()
+            finally:
+                coord._video_start_lock.release()
+            coord._vip_listener = MagicMock()
+            await coord._repair_vip_listener()
+        ensure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notifications_off_never_repairs(self):
+        coord = _coordinator()
+        coord.config_entry.options = {"enable_notifications": False}
+        with patch.object(coord, "_ensure_vip_listener", new_callable=AsyncMock) as ensure:
+            await coord._repair_vip_listener()
+        ensure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_health_check_runs_the_repair(self):
+        coord = _coordinator()
+        with patch.object(coord, "_repair_vip_listener", new_callable=AsyncMock) as repair:
+            assert await coord._async_update_data() is coord._config
+        repair.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_release_during_start_waits_then_stops_and_restores(self):
+        coord = _coordinator()
+        order: list[str] = []
+
+        async def _stop():
+            order.append("stop")
+
+        async def _ensure():
+            order.append("ensure")
+
+        await coord._video_start_lock.acquire()
+        with (
+            patch.object(coord, "async_stop_video", side_effect=_stop),
+            patch.object(coord, "_ensure_vip_listener", side_effect=_ensure),
+        ):
+            task = asyncio.get_running_loop().create_task(coord._stop_after_release())
+            await asyncio.sleep(0)
+            assert order == []  # still waiting for the ring's start to finish
+            coord._video_start_lock.release()
+            await task
+        assert order == ["stop", "ensure"]

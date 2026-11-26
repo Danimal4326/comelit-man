@@ -7,6 +7,7 @@
 - **Answering a ring is accepted by the panel** — the answer sent VOICESTATUS with our own address followed by a 2-byte `000c`; a 6701W (fw 2.4.3) never accepted it (no audio channel, the in-call door open ignored). It now sends the 8-byte SETUP_ACK `000c000000000000` on the ring's connection with the panel's current ack, byte-identical to what homebridge-comelit-doorbell sends there (captured 2026-11-24: the panel then sends its media request and VOICESTATUS, other receivers get RELEASE cause 10, and the in-call open trips the gate). The capabilities on a ring use `0x27`, as the Comelit app and that plugin send
 - **A ring answered elsewhere is not a missed call** — the panel's RELEASE with cause 10 (another receiver answered) now ends Home Assistant's passive session without firing `missed_call`
 - **Answer presses are serialised**, and a call only counts as answered once the panel acknowledged the answer
+- **Rings no longer stop after a ring answered elsewhere** — when another receiver answered within seconds (e.g. a HomeKit view with Homebridge's `answer-on-view`), the release arrived while Home Assistant was still starting the ring's video, the stop found nothing, and the ended session stayed behind: the VIP listener never came back and every later ring was missed (seen 2026-11-25). The release now waits for the start to finish before stopping, a session that ends after a stop request is cleared, and the 30 s health check restores a missing VIP listener (and re-registers) whenever no call holds the channel
 
 ### New features
 
